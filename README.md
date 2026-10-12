@@ -48,10 +48,16 @@ Kaska/
 ### Requisitos de Compilación
 - **Rust:** Versión estable 1.85+ (probado con `rustc 1.95.0`).
 - **Cargo:** Incluido en la instalación de Rust.
-- **Dependencias del sistema (Linux para Slint):**
+- **Dependencias del sistema (Linux para compilación de Slint):**
   ```bash
-  sudo apt-get install -y libfontconfig1-dev libfreetype6-dev libx11-dev libx11-xcb-dev libxkbcommon-dev
+  sudo apt-get install -y --no-install-recommends pkg-config libfontconfig1-dev libxkbcommon-dev
   ```
+  *(Nota: Para ejecutar la interfaz gráfica interactiva en Linux se requiere un servidor X11 o Wayland activo; el modo headless `--headless-test` no requiere display en runtime).*
+
+> **Estado de verificación de plataformas:**
+> - Tests locales Windows: **Verificados (PASS)**.
+> - CI remota Windows / Linux (GitHub Actions): **Definida en `.github/workflows/ci.yml`, pendiente de ejecución remota real**.
+> - Soporte visual Slint en Linux: **Pendiente de comprobación funcional interactiva**.
 
 ---
 
@@ -90,4 +96,4 @@ cargo clippy --workspace --all-targets --jobs 2 -- -D warnings
 ## ⚖️ Licenciamiento y Atribución
 
 - **Kaska:** Desarrollado como proyecto de código abierto para educación y auditoría técnica. La selección de la licencia definitiva del repositorio (GPLv3 vs. modelo dual con permisiva) se encuentra documentada y pendiente de formalización.
-- **Slint UI Toolkit:** Desarrollado por SixtyFPS GmbH (https://slint.dev). Kaska incluye con orgullo los créditos y cumple las condiciones de la Royalty-Free Desktop License y GPLv3.
+- **Slint UI Toolkit:** Desarrollado por SixtyFPS GmbH (https://slint.dev) bajo triple licencia (GPLv3 / Royalty-Free Desktop / Comercial). Kaska reconoce los términos de uso aplicables. Para distribución de binarios bajo la modalidad Royalty-Free Desktop, las condiciones oficiales de Slint requieren incluir el componente oficial `AboutSlint` en la interfaz de usuario O exhibir un distintivo oficial de Slint en una página pública adecuada (conforme a las directrices de marca de SixtyFPS GmbH); dicho requisito permanece registrado como pendiente antes de cualquier distribución pública de binarios.

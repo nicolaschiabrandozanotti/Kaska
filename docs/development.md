@@ -13,10 +13,21 @@ Esta guía proporciona las instrucciones necesarias para clonar, compilar, ejecu
   ```
 - **Windows:** Visual Studio 2022 Build Tools con soporte de C++ (MSVC toolchain x86_64).
 - **Linux (Ubuntu/Debian):**
-  ```bash
-  sudo apt-get update
-  sudo apt-get install -y build-essential libfontconfig1-dev libfreetype6-dev libx11-dev libx11-xcb-dev libxkbcommon-dev
-  ```
+  - **Dependencias de compilación y enlace (necesarias para Cargo y Slint):**
+    ```bash
+    sudo apt-get update
+    sudo apt-get install -y --no-install-recommends pkg-config libfontconfig1-dev libxkbcommon-dev
+    ```
+  - **Dependencias para ejecución de interfaz gráfica interactiva (X11 / Wayland):** Servidor gráfico activo (X11 o compositor Wayland) y bibliotecas de ventanas/input (`libx11-dev`, `libx11-xcb-dev`, `libfreetype6-dev`).
+  - **Modo headless (`--headless-test`):** No requiere servidor gráfico ni display en runtime (bifurca antes de la inicialización de ventana Slint).
+
+> [!NOTE]
+> **Estado de verificación de plataformas y CI:**
+> - **Tests locales Windows:** Verificados al 100% en host Windows x86_64.
+> - **CI Windows / Linux (GitHub Actions):** Flujo definido en `.github/workflows/ci.yml`, pendiente de primera ejecución remota real en runners.
+> - **Validación Semántica `actionlint`:** GitHub Actions no ejecuta `actionlint` por defecto; el gate semántico de `actionlint` permanece **PENDING** hasta que se ejecute explícitamente en un entorno que disponga de la herramienta.
+> - **Soporte visual Slint en Linux:** Pendiente de comprobación funcional interactiva sobre sesión de escritorio Linux real.
+> - **Comportamiento de `--locked`:** El flag `--locked` no deshabilita el acceso a la red por sí mismo (a diferencia de `--offline`), sino que exige que Cargo respete estrictamente el archivo `Cargo.lock` sin actualizar ni recalcular versiones de dependencias.
 
 ---
 
@@ -52,8 +63,8 @@ cargo run -p kaska-desktop --jobs 2 -- --headless-test
 ## 4. Pruebas y Control de Calidad
 
 ```bash
-# 1. Ejecutar todos los tests unitarios y de integración con hilos acotados
-cargo test --workspace --jobs 2 -- --test-threads=2
+# 1. Ejecutar todos los tests unitarios y de integración con hilos acotados y lockfile estricto
+cargo test --workspace --locked --jobs 2 -- --test-threads=2
 
 # 2. Verificar formato con rustfmt
 cargo fmt --all -- --check

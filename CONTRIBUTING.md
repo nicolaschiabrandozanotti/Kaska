@@ -52,9 +52,9 @@ Todos los mensajes de commit deben seguir la especificación [Conventional Commi
 
 - **Compilador:** Rust estable (versión 1.85+ recomendada, compatible con edición 2021).
 - **Herramientas:** `rustfmt` y `clippy`.
-- **Dependencias del sistema (Linux):** Para compilar Slint en Linux, se requieren las bibliotecas de desarrollo de Fontconfig, FreeType y X11/Wayland:
+- **Dependencias del sistema (Linux para compilar Slint):** Para compilar el workspace en Linux, se requieren las bibliotecas de desarrollo de Fontconfig, pkg-config y xkbcommon:
   ```bash
-  sudo apt-get install -y libfontconfig1-dev libfreetype6-dev libx11-dev libx11-xcb-dev libxkbcommon-dev
+  sudo apt-get install -y --no-install-recommends pkg-config libfontconfig1-dev libxkbcommon-dev
   ```
 
 ---
@@ -90,7 +90,7 @@ Antes de enviar un Pull Request o proponer cambios, asegúrese de que todos los 
    ```
 3. **Suite Completa de Tests:**
    ```bash
-   cargo test --workspace --jobs 2 -- --test-threads=2
+   cargo test --workspace --locked --jobs 2 -- --test-threads=2
    ```
 4. **Prueba Headless de la Aplicación:**
    ```bash

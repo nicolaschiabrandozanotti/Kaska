@@ -33,11 +33,12 @@
 
 1. **Aislamiento de `kaska-http`:**
    - Cero dependencias de GUI o Slint.
-   - Es una biblioteca pura de networking y protocolo HTTP/1.1 que puede utilizarse en entornos headless, herramientas CLI o servidores independientes.
+   - Es una biblioteca pura de networking y protocolo HTTP/1.1 que puede utilizarse en entornos headless, herramientas CLI o servidores independientes. Sus dependencias directas en runtime se limitan a utilidades estándar del ecosistema Rust (`thiserror` para modelado tipado de errores y `regex`), manteniendo cero dependencias de frameworks gráficos o de interfaz.
 2. **`kaska-desktop` como orquestador:**
    - Contiene el punto de entrada binario (`main.rs`), la ventana principal de Slint y el controlador reactivo.
    - Consume `kaska-http` a través de sus contratos públicos (`NativeProxyServer`, `AuditScope`, `SharedTrafficStore`, `HttpTransaction`).
 3. **Cero Dependencias Circulares:** Las dependencias fluyen estrictamente desde la UI hacia los motores.
+4. **Validación Multiplataforma y CI:** El motor `kaska-http` es 100% independiente de plataforma y compila de forma idéntica en Windows y Linux. `kaska-desktop` incluye modo `--headless-test` ejecutable en pipelines de CI sin requerir servidor gráfico X11/Wayland.
 
 ---
 

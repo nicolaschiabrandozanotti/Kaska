@@ -1,0 +1,119 @@
+name: CI
+
+"on":
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+# Minimum permissions: read-only access to repository contents. No write or administrative tokens.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: CI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libfontconfig1-dev libxkbcommon-dev
+
+      - name: Check code formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy static analysis
+        run: cargo clippy --workspace --all-targets --jobs 2 -- -D warnings
+
+      - name: Run workspace tests
+        run: cargo test --workspace --locked --jobs 2 -- --test-threads=2
+
+      - name: Build kaska-http headless library
+        run: cargo build --package kaska-http --locked --jobs 2
+
+      - name: Build kaska-desktop binary (dev)
+        run: cargo build --package kaska-desktop --locked --jobs 2
+
+      - name: Build workspace (release)
+        run: cargo build --workspace --release --locked --jobs 2
+
+      - name: Headless smoke test (Windows)
+        if: runner.os == 'Windows'
+        run: .\target\release\kaska-desktop.exe --headless-test
+
+      - name: Headless smoke test (Linux)
+        if: runner.os == 'Linux'
+        run: ./target/release/kaska-desktop --headless-test
+
+      - name: Verify socket listeners released (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $targetPorts = @(18080, 18989)
+          try {
+            $properties = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties()
+            $activeListeners = $properties.GetActiveTcpListeners()
+          } catch {
+            Write-Error "ERROR: Failed to query active TCP listeners: $_"
+            exit 1
+          }
+
+          $lingering = $activeListeners | Where-Object { $_.Port -in $targetPorts }
+          if ($lingering) {
+            $details = $lingering | ForEach-Object { "$($_.Address):$($_.Port)" }
+            Write-Error "ERROR: Lingering socket listener detected on test port(s): $($details -join ', ')"
+            exit 1
+          }
+          Write-Host "Socket release verification passed: test ports $targetPorts are free."
+
+      - name: Verify socket listeners released (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          if SS_OUT=$(ss -tln 2>&1); then
+            :
+          else
+            rc=$?
+            echo "ERROR: ss failed to execute (exit $rc): $SS_OUT" >&2
+            exit 1
+          fi
+
+          MATCH=$(echo "$SS_OUT" | grep -E ':(18080|18989)\b' || true)
+          if [ -n "$MATCH" ]; then
+            echo "ERROR: Lingering socket listener detected on test ports 18080/18989:" >&2
+            echo "$MATCH" >&2
+            exit 1
+          fi
+          echo "Socket release verification passed: test ports 18080 and 18989 are free."
+
+      - name: Validate workspace metadata
+        run: cargo metadata --format-version 1 --no-deps
