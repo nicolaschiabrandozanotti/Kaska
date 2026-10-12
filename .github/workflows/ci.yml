@@ -86,6 +86,7 @@ jobs:
 
       - name: Headless smoke test (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: .\target\release\kaska-desktop.exe --headless-test
 
       - name: Headless smoke test (Linux)
