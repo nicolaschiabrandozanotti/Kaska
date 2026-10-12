@@ -110,3 +110,9 @@ Antes de enviar un Pull Request o proponer cambios, asegúrese de que todos los 
 3. No incluya archivos `.agents/`, binarios compilados en `target/`, capturas de tráfico `.pcap` ni credenciales privadas.
 4. Abra el Pull Request apuntando a la rama `develop`.
 5. Todos los checks de CI automatizados deben concluir en estado verde (PASS).
+
+---
+
+## 8. Licencia de Contribuciones
+
+El código original de Kaska se distribuye bajo licencia dual **MIT OR Apache-2.0** ([LICENSE-MIT](LICENSE-MIT) y [LICENSE-APACHE](LICENSE-APACHE)). Al enviar un Pull Request o contribución al repositorio, aceptas que tu aporte se licencie bajo los mismos términos duales (`MIT OR Apache-2.0`), sin términos ni condiciones adicionales.
