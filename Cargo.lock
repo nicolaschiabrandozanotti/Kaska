@@ -2358,6 +2358,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaska-desktop"
+version = "0.1.0"
+dependencies = [
+ "kaska-http",
+ "slint",
+ "slint-build",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "kaska-http"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "keyboard-types"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3794,17 +3812,6 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
-
-[[package]]
-name = "sentinel-desktop"
-version = "0.1.0"
-dependencies = [
- "regex",
- "slint",
- "slint-build",
- "tempfile",
- "thiserror 2.0.21",
-]
 
 [[package]]
 name = "serde"

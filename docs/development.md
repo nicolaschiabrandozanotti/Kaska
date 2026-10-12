@@ -1,0 +1,77 @@
+# Guía de Desarrollo Local — Kaska
+
+Esta guía proporciona las instrucciones necesarias para clonar, compilar, ejecutar, probar y depurar **Kaska** en entornos de desarrollo Windows y Linux.
+
+---
+
+## 1. Requisitos Previos
+
+- **Rust:** Versión estable 1.85+ (edición 2021). Instalar mediante [rustup](https://rustup.rs/):
+  ```bash
+  rustup update stable
+  rustup component add rustfmt clippy
+  ```
+- **Windows:** Visual Studio 2022 Build Tools con soporte de C++ (MSVC toolchain x86_64).
+- **Linux (Ubuntu/Debian):**
+  ```bash
+  sudo apt-get update
+  sudo apt-get install -y build-essential libfontconfig1-dev libfreetype6-dev libx11-dev libx11-xcb-dev libxkbcommon-dev
+  ```
+
+---
+
+## 2. Flujo de Compilación
+
+Siempre limite la concurrencia de compilación para no saturar el equipo de desarrollo:
+
+```bash
+# Compilar todo el workspace
+cargo build --workspace --jobs 2
+
+# Compilar en modo Release optimizado
+cargo build --workspace --release --jobs 2
+```
+
+---
+
+## 3. Ejecución de la Aplicación
+
+### Modo Desarrollo (GUI Slint)
+```bash
+cargo run -p kaska-desktop --jobs 2
+```
+
+### Modo Verificación Headless (Sin interfaz gráfica)
+Ideal para verificar la captura real de tráfico HTTP sobre sockets TCP en servidores sin pantalla o en integración continua:
+```bash
+cargo run -p kaska-desktop --jobs 2 -- --headless-test
+```
+
+---
+
+## 4. Pruebas y Control de Calidad
+
+```bash
+# 1. Ejecutar todos los tests unitarios y de integración con hilos acotados
+cargo test --workspace --jobs 2 -- --test-threads=2
+
+# 2. Verificar formato con rustfmt
+cargo fmt --all -- --check
+
+# 3. Análisis de linter estricto con Clippy
+cargo clippy --workspace --all-targets --jobs 2 -- -D warnings
+```
+
+---
+
+## 5. Diagnóstico de Problemas Comunes
+
+1. **Error de enlace en Linux: `cannot find -lfontconfig` o `-lfreetype`:**
+   - *Causa:* Faltan dependencias de desarrollo de fuentes utilizadas por Slint.
+   - *Solución:* Instalar `libfontconfig1-dev` y `libfreetype6-dev`.
+2. **Error `Address already in use` (os error 10048 / 98):**
+   - *Causa:* Una instancia previa de Kaska o de otra herramienta continúa escuchando en el puerto 8080 o 8989.
+   - *Solución:* Identificar el proceso mediante `netstat -ano | findstr 8080` (Windows) o `ss -tulpn | grep 8080` (Linux) y terminarlo.
+3. **Fallo de conexión a `localhost` en servidores IPv4-only:**
+   - *Causa:* En Windows, `localhost` resuelve prioritariamente a `::1` (IPv6).
+   - *Solución:* Kaska implementa resolución dual-stack con fallback automático a `127.0.0.1` si el listener es IPv4-only.

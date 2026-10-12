@@ -1,0 +1,151 @@
+import { AppTheme } from "../styles/theme.slint";
+
+export component ScopeView inherits Rectangle {
+    background: transparent;
+
+    Flickable {
+        content-height: 540px;
+
+        VerticalLayout {
+            padding: 20px;
+            spacing: 16px;
+
+            // Scope Header Card
+            Rectangle {
+                background: AppTheme.bg-card;
+                border-color: AppTheme.border-subtle;
+                border-width: 1px;
+                border-radius: 8px;
+
+                VerticalLayout {
+                    padding: 18px;
+                    spacing: 8px;
+
+                    Text {
+                        text: "Audit Target Scope Enforcement";
+                        color: AppTheme.text-primary;
+                        font-size: 15px;
+                        font-weight: 700;
+                    }
+
+                    Text {
+                        text: "Kaska enforces strict in-scope target filtering. The proxy rejects any outbound connection whose destination host is not explicitly declared in this authorized scope. This prevents accidental traffic leakage or out-of-scope interactions during CTF and educational labs.";
+                        color: AppTheme.text-secondary;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            // Allowed Targets List
+            Rectangle {
+                background: AppTheme.bg-card;
+                border-color: AppTheme.border-subtle;
+                border-width: 1px;
+                border-radius: 8px;
+
+                VerticalLayout {
+                    padding: 18px;
+                    spacing: 12px;
+
+                    Text {
+                        text: "Configured In-Scope Targets";
+                        color: AppTheme.text-primary;
+                        font-size: 13px;
+                        font-weight: 700;
+                    }
+
+                    // Host item 1
+                    Rectangle {
+                        height: 38px;
+                        background: #111520;
+                        border-radius: 6px;
+                        border-color: AppTheme.border-subtle;
+                        border-width: 1px;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            alignment: space-between;
+
+                            Text {
+                                text: "127.0.0.1 (Localhost IPv4)";
+                                color: AppTheme.text-primary;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: "Active / Authorized";
+                                color: AppTheme.success;
+                                font-size: 11px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Host item 2
+                    Rectangle {
+                        height: 38px;
+                        background: #111520;
+                        border-radius: 6px;
+                        border-color: AppTheme.border-subtle;
+                        border-width: 1px;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            alignment: space-between;
+
+                            Text {
+                                text: "localhost";
+                                color: AppTheme.text-primary;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: "Active / Authorized";
+                                color: AppTheme.success;
+                                font-size: 11px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Host item 3
+                    Rectangle {
+                        height: 38px;
+                        background: #111520;
+                        border-radius: 6px;
+                        border-color: AppTheme.border-subtle;
+                        border-width: 1px;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            alignment: space-between;
+
+                            Text {
+                                text: "::1 (Localhost IPv6)";
+                                color: AppTheme.text-primary;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: "Active / Authorized";
+                                color: AppTheme.success;
+                                font-size: 11px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

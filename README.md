@@ -1,22 +1,41 @@
-# Sentinel — Native Security & Network Inspection Platform
+# Kaska — Native Security & Network Inspection Platform
 
-**Sentinel** es una plataforma nativa de escritorio para auditoría de seguridad informática, inspección de tráfico e investigación técnica, desarrollada íntegramente en **Rust** con interfaz gráfica moderna en **Slint**.
+**Kaska** es una plataforma nativa de escritorio para auditoría de seguridad informática, inspección de tráfico de red e investigación técnica, desarrollada íntegramente en **Rust** con interfaz gráfica en **Slint**.
 
 ---
 
 ## 🎯 Visión y Principios del Producto
 
-Sentinel **no es un wrapper ni un frontend** de herramientas de terceros (Burp, Nmap, ffuf, etc.). Es una **plataforma con capacidades nativas propias** escritas en Rust, inspirada en las mejores prácticas de herramientas de la industria:
-- **De Chrome DevTools Network & Burp HTTP History:** Inspección estructurada de solicitudes y respuestas HTTP en tiempo real, análisis de headers, cookies, parámetros y métricas de latencia.
-- **De Burp Suite Repeater:** Motor nativo de composición manual y reenvío de solicitudes HTTP.
-- **De Nmap & scanners:** Descubrimiento nativo de hosts, puertos y servicios en Rust (Hitos futuros).
-- **De ffuf / Gobuster:** Fuzzing y descubrimiento de recursos con concurrencia nativa en Rust (Hitos futuros).
+Kaska **no es un wrapper ni un frontend** de herramientas de terceros (Burp Suite, Nmap, ffuf, Gobuster, etc.). Es una **plataforma modular con capacidades nativas propias** escritas en Rust:
+
+- **Network Inspector:** Inspección estructurada de solicitudes y respuestas HTTP/1.1 en tiempo real, análisis de cabeceras, cookies, cuerpos, estados de framing RFC 9112 y latencia.
+- **Proxy de Captura y Streaming:** Motor proxy nativo con soporte de chunked transfer, desacoplamiento entre buffer de transmisión e inspección, y protección de alcance loopback.
+- **Target Scope:** Control estricto pre y post-resolución DNS que confina el tráfico exclusivamente al laboratorio autorizado (`127.0.0.1`, `localhost`, `::1`).
+- **Compositor Repeater:** Base para composición manual e inspección interactiva.
+- **Herramientas de red nativas:** Diseñado para incorporar gradualmente descubrimiento de puertos, escaneo y fuzzing sin depender de binarios externos.
 
 **Principios fundamentales:**
-1. **100% Nativo:** Cero Electron, Chromium embebido o entornos web pesados.
+1. **100% Nativo:** Cero dependencias de Electron, NodeJS embebido o navegadores pesados.
 2. **Cero Dependencia Externa:** No requiere tener instalado Burp, Nmap ni Python. Todo el motor corre en código Rust nativo compilado.
-3. **Uso Ético y Ámbito Restringido:** Diseñado para laboratorios propios, educación en ciberseguridad, CTF y auditorías con autorización contractual. El alcance (*Target Scope*) se define explícitamente y bloquea tráfico no autorizado.
-4. **Open Source y Libre:** Desarrollado como proyecto personal abierto a contribuciones de la comunidad.
+3. **Uso Ético y Ámbito Restringido:** Diseñado para laboratorios propios, educación en ciberseguridad, CTF y auditorías con autorización contractual.
+4. **Open Source y Modular:** Desarrollado como proyecto personal abierto a contribuciones, organizado en un Cargo Workspace desacoplado.
+
+---
+
+## 🏗️ Arquitectura del Workspace
+
+El proyecto está estructurado como un Cargo Workspace modular:
+
+```text
+Kaska/
+├── crates/
+│   ├── kaska-http/       # Motor HTTP, parser RFC 9112, proxy de streaming, store y test server
+│   └── kaska-desktop/    # Aplicación binaria, ventana Slint, controller y bridge de UI
+├── docs/                 # Documentación de arquitectura, módulos, desarrollo y ADRs
+├── AGENTS.md             # Directivas operativas para agentes automatizados e IA
+├── CONTRIBUTING.md       # Guía de contribución, GitFlow y Conventional Commits
+└── SECURITY.md           # Política de seguridad y uso ético autorizado
+```
 
 ---
 
@@ -27,70 +46,48 @@ Sentinel **no es un wrapper ni un frontend** de herramientas de terceros (Burp, 
 - **Linux:** Distribuciones modernas (Ubuntu, Fedora, Arch, Debian) con X11 o Wayland.
 
 ### Requisitos de Compilación
-- **Rust:** Versión estable 1.80+ (probado con `rustc 1.95.0`).
+- **Rust:** Versión estable 1.85+ (probado con `rustc 1.95.0`).
 - **Cargo:** Incluido en la instalación de Rust.
+- **Dependencias del sistema (Linux para Slint):**
+  ```bash
+  sudo apt-get install -y libfontconfig1-dev libfreetype6-dev libx11-dev libx11-xcb-dev libxkbcommon-dev
+  ```
 
 ---
 
 ## 🚀 Compilación y Ejecución
 
-### 1. Clonar y Compilar
+### 1. Compilación
 ```bash
-git clone <repo-url>
-cd adventurous-mendeleev
-cargo build --release
+# Compilación controlada con concurrencia acotada
+cargo build --workspace --jobs 2
 ```
 
 ### 2. Ejecutar la Aplicación Desktop
 ```bash
 # Ejecutar en modo desarrollo
-cargo run
+cargo run -p kaska-desktop --jobs 2
 
 # O ejecutar el binario release generado
-./target/release/sentinel-desktop
+./target/release/kaska-desktop
 ```
 
-### 3. Prueba de Captura HTTP Real (Modo Headless / CI)
-Sentinel incluye un modo de prueba autónomo que arranca un servidor de prueba controlado local, levanta el proxy nativo sobre sockets TCP reales, envía tráfico HTTP real y verifica la captura sin necesidad de abrir la ventana gráfica:
+### 3. Prueba Headless de Captura Real (Modo Verificación / CI)
+Kaska incluye un modo de verificación autónomo que arranca un servidor de pruebas controlado local, inicia el proxy nativo sobre sockets TCP reales, despacha transacciones HTTP y valida la captura sin necesidad de abrir entorno gráfico:
 ```bash
-cargo run -- --headless-test
+cargo run -p kaska-desktop --jobs 2 -- --headless-test
 ```
 
-### 4. Ejecutar la Suite Completa de Tests
+### 4. Ejecutar la Suite de Pruebas
 ```bash
-cargo test
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
+cargo test --workspace --jobs 2 -- --test-threads=2
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --jobs 2 -- -D warnings
 ```
-
----
-
-## 🔍 Funcionalidades del Hito 0 (Network Inspector)
-
-1. **Proxy HTTP Nativo:**
-   - Listener local en `127.0.0.1:8080`.
-   - Intercepta y reenvía tráfico HTTP/1.1 entre clientes locales y destinos dentro del alcance.
-2. **Servidor de Pruebas Controlado:**
-   - Servidor local en `127.0.0.1:8989` con endpoints `/api/status`, `/api/echo`, `/auth/login` y `/admin/restricted`.
-   - Botón directo en la barra superior: **"⚡ Test Local Capture"** para generar tráfico HTTP real y ver su captura inmediata en vivo.
-3. **Network Inspector (Tabla y Panel Dividido):**
-   - Tabla reactiva con columnas: `#`, `Method`, `Status`, `Host`, `Path`, `Latency (ms)`, `Size (bytes)`, `Content-Type`.
-   - Selección de filas con visor detallado de:
-     - Headers crudos de la solicitud.
-     - Payload del cuerpo de la solicitud.
-     - Headers crudos de la respuesta.
-     - Payload del cuerpo de la respuesta.
-     - Métrica de latencia y estado.
-4. **Target Scope:**
-   - Reglas de alcance configurables (`127.0.0.1`, `localhost`, etc.) para prevenir fugas accidentales de tráfico fuera del laboratorio.
-5. **Base Arquitectónica del Repeater:**
-   - Pestaña de compositor manual de solicitudes lista para incorporar el replay interactivo en el Hito 1.
-6. **Acerca de y Licencias:**
-   - Reconocimiento explícito del toolkit Slint (Royalty-Free Desktop License y GPLv3).
 
 ---
 
 ## ⚖️ Licenciamiento y Atribución
 
-- **Sentinel Core & UI:** Preparado para distribución Open Source libre bajo **GNU GPLv3** (o arquitectura dual con librerías base en MIT/Apache-2.0).
-- **Slint UI Toolkit:** Desarrollado por SixtyFPS GmbH (https://slint.dev). Sentinel muestra con orgullo la atribución correspondiente en cumplimiento con la Royalty-Free Desktop License y GPLv3.
+- **Kaska:** Desarrollado como proyecto de código abierto para educación y auditoría técnica. La selección de la licencia definitiva del repositorio (GPLv3 vs. modelo dual con permisiva) se encuentra documentada y pendiente de formalización.
+- **Slint UI Toolkit:** Desarrollado por SixtyFPS GmbH (https://slint.dev). Kaska incluye con orgullo los créditos y cumple las condiciones de la Royalty-Free Desktop License y GPLv3.
