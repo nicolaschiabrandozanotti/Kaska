@@ -1,0 +1,109 @@
+import { AppTheme } from "styles/theme.slint";
+import { TrafficItem } from "components/traffic_types.slint";
+import { Sidebar } from "components/sidebar.slint";
+import { Header } from "components/header.slint";
+import { StatusBar } from "components/status_bar.slint";
+import { NetworkInspectorView } from "views/inspector.slint";
+import { RepeaterView } from "views/repeater.slint";
+import { ScopeView } from "views/scope.slint";
+import { SettingsView } from "views/settings.slint";
+
+export component AppWindow inherits Window {
+    title: "Sentinel — Native Security & Network Inspection Platform";
+    min-width: 1080px;
+    min-height: 720px;
+    preferred-width: 1200px;
+    preferred-height: 780px;
+    background: AppTheme.bg-base;
+
+    // Navigation
+    in-out property <int> active-tab: 0;
+
+    // Proxy engine state
+    in property <string> proxy-addr: "127.0.0.1:8080";
+    in property <bool> proxy-running: true;
+    in property <bool> is-sending-test: false;
+
+    // Traffic data
+    in property <[TrafficItem]> transactions: [];
+    in-out property <int> selected-transaction-idx: -1;
+    in property <string> active-req-headers: "";
+    in property <string> active-req-body: "";
+    in property <string> active-resp-headers: "";
+    in property <string> active-resp-body: "";
+    in property <string> active-timing-text: "";
+
+    // Status bar & environment
+    in property <string> status-message: "Proxy listening on 127.0.0.1:8080";
+    in property <string> os-info: "Windows x86_64";
+    in property <int> transactions-count: 0;
+
+    // Callbacks to Rust backend
+    callback toggle-proxy();
+    callback send-test-traffic();
+    callback select-transaction(int);
+    callback clear-history();
+
+    HorizontalLayout {
+        // Navigation Sidebar
+        Sidebar {
+            active-tab: root.active-tab;
+            select-tab(idx) => {
+                root.active-tab = idx;
+            }
+        }
+
+        // Main Column
+        VerticalLayout {
+            // Header
+            Header {
+                title: root.active-tab == 0 ? "Network Inspector" :
+                       root.active-tab == 1 ? "HTTP Repeater" :
+                       root.active-tab == 2 ? "Target Scope" : "Settings & About";
+                subtitle: root.active-tab == 0 ? "Real-time HTTP traffic capture, header inspection and timing analysis" :
+                          root.active-tab == 1 ? "Manual request composer and replay engine (Milestone 1 foundation)" :
+                          root.active-tab == 2 ? "In-scope authorized target definitions and ethical boundary rules" :
+                          "Local proxy listener ports, diagnostics, and Slint open-source credits";
+                proxy-addr: root.proxy-addr;
+                proxy-running: root.proxy-running;
+                is-sending-test: root.is-sending-test;
+                toggle-proxy => { root.toggle-proxy(); }
+                send-test-traffic => { root.send-test-traffic(); }
+            }
+
+            // View Content
+            Rectangle {
+                background: AppTheme.bg-base;
+
+                if root.active-tab == 0: NetworkInspectorView {
+                    items: root.transactions;
+                    selected-index <=> root.selected-transaction-idx;
+                    active-req-headers: root.active-req-headers;
+                    active-req-body: root.active-req-body;
+                    active-resp-headers: root.active-resp-headers;
+                    active-resp-body: root.active-resp-body;
+                    active-timing-text: root.active-timing-text;
+                    select-item(idx) => { root.select-transaction(idx); }
+                    clear-history => { root.clear-history(); }
+                }
+
+                if root.active-tab == 1: RepeaterView {}
+
+                if root.active-tab == 2: ScopeView {}
+
+                if root.active-tab == 3: SettingsView {
+                    proxy-port: "8080";
+                    test-port: "8989";
+                    os-info: root.os-info;
+                }
+            }
+
+            // Bottom Status Bar
+            StatusBar {
+                status-text: root.status-message;
+                os-info: root.os-info;
+                transactions-count: root.transactions-count;
+            }
+        }
+    }
+}

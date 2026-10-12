@@ -1,0 +1,175 @@
+import { AppTheme } from "../styles/theme.slint";
+
+component NavItem inherits Rectangle {
+    in property <string> icon-text: "";
+    in property <string> label: "";
+    in property <bool> is-active: false;
+    callback clicked();
+
+    height: 44px;
+    border-radius: 6px;
+    background: is-active ? #1e293b : touch-area.has-hover ? #171d2b : transparent;
+    animate background { duration: 150ms; }
+
+    touch-area := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 12px;
+        alignment: start;
+
+        if is-active: Rectangle {
+            width: 3px;
+            height: 20px;
+            background: AppTheme.accent;
+            border-radius: 2px;
+        }
+
+        Text {
+            text: root.icon-text;
+            color: root.is-active ? AppTheme.accent : AppTheme.text-muted;
+            font-size: 15px;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: root.label;
+            color: root.is-active ? AppTheme.text-primary : AppTheme.text-secondary;
+            font-size: 14px;
+            font-weight: root.is-active ? 600 : 400;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component Sidebar inherits Rectangle {
+    in property <int> active-tab: 0;
+    callback select-tab(int);
+
+    width: 240px;
+    background: AppTheme.bg-surface;
+    border-color: AppTheme.border-subtle;
+    border-width: 1px;
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+
+        // Branding
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: start;
+            padding-bottom: 12px;
+
+            Rectangle {
+                width: 32px;
+                height: 32px;
+                background: AppTheme.accent;
+                border-radius: 6px;
+
+                Text {
+                    text: "S";
+                    color: #ffffff;
+                    font-size: 18px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: "SENTINEL";
+                    color: AppTheme.text-primary;
+                    font-size: 14px;
+                    font-weight: 700;
+                    letter-spacing: 1.5px;
+                }
+                Text {
+                    text: "Native Security Suite";
+                    color: AppTheme.text-muted;
+                    font-size: 11px;
+                }
+            }
+        }
+
+        Rectangle {
+            height: 1px;
+            background: AppTheme.border-subtle;
+        }
+
+        // Navigation links
+        VerticalLayout {
+            spacing: 4px;
+            padding-top: 6px;
+
+            NavItem {
+                icon-text: "🌐";
+                label: "Network Inspector";
+                is-active: root.active-tab == 0;
+                clicked => { root.select-tab(0); }
+            }
+
+            NavItem {
+                icon-text: "🔁";
+                label: "HTTP Repeater";
+                is-active: root.active-tab == 1;
+                clicked => { root.select-tab(1); }
+            }
+
+            NavItem {
+                icon-text: "🛡";
+                label: "Target Scope";
+                is-active: root.active-tab == 2;
+                clicked => { root.select-tab(2); }
+            }
+
+            NavItem {
+                icon-text: "⚙";
+                label: "Settings & About";
+                is-active: root.active-tab == 3;
+                clicked => { root.select-tab(3); }
+            }
+        }
+
+        Rectangle {}
+
+        // Footer version & license
+        Rectangle {
+            background: #0f131d;
+            border-radius: 6px;
+            border-color: AppTheme.border-subtle;
+            border-width: 1px;
+            height: 72px;
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 3px;
+                alignment: center;
+
+                Text {
+                    text: "Sentinel Platform • v0.1.0";
+                    color: AppTheme.text-secondary;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+
+                Text {
+                    text: "Built with Slint GUI";
+                    color: AppTheme.accent;
+                    font-size: 11px;
+                }
+
+                Text {
+                    text: "Authorized Audits Only";
+                    color: AppTheme.warning;
+                    font-size: 10px;
+                }
+            }
+        }
+    }
+}

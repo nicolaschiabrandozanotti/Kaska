@@ -1,0 +1,164 @@
+import { AppTheme } from "../styles/theme.slint";
+
+export component ToolCard inherits Rectangle {
+    in property <string> tool-name: "";
+    in property <string> category: "";
+    in property <string> icon: "🔧";
+    in property <string> description: "";
+    in property <string> status-text: "Planned";
+    in property <string> version-text: "";
+    in property <string> path-text: "";
+    in property <bool> is-ready: false;
+    in property <bool> is-missing: false;
+    in property <bool> is-checking: false;
+    in property <bool> is-planned: true;
+    in property <bool> can-action: false;
+    callback action-clicked();
+
+    background: AppTheme.bg-card;
+    border-color: is-ready ? #1e3a5f : is-missing ? #451a03 : AppTheme.border-subtle;
+    border-width: 1px;
+    border-radius: 8px;
+    height: 180px;
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+
+        // Header: Icon + Name + Category + Status Badge
+        HorizontalLayout {
+            alignment: space-between;
+
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: center;
+
+                Rectangle {
+                    width: 32px;
+                    height: 32px;
+                    background: is-ready ? #0f291e : is-missing ? #2e1605 : #1a2030;
+                    border-radius: 6px;
+                    Text {
+                        text: root.icon;
+                        font-size: 16px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: root.tool-name;
+                        color: AppTheme.text-primary;
+                        font-size: 14px;
+                        font-weight: 700;
+                    }
+                    Text {
+                        text: root.category;
+                        color: AppTheme.text-muted;
+                        font-size: 11px;
+                    }
+                }
+            }
+
+            // Status Badge
+            Rectangle {
+                height: 24px;
+                border-radius: 12px;
+                background: is-ready ? #064e3b : is-missing ? #78350f : is-checking ? #1e3a8a : #1f2937;
+                border-color: is-ready ? AppTheme.success : is-missing ? AppTheme.warning : is-checking ? AppTheme.info : AppTheme.border-subtle;
+                border-width: 1px;
+
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    alignment: center;
+                    Text {
+                        text: root.status-text;
+                        color: is-ready ? #a7f3d0 : is-missing ? #fde68a : is-checking ? #93c5fd : #9ca3af;
+                        font-size: 11px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // Description
+        Text {
+            text: root.description;
+            color: AppTheme.text-secondary;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+
+        // Spacer
+        Rectangle {}
+
+        // Footer: Metadata & Action
+        HorizontalLayout {
+            alignment: space-between;
+
+            VerticalLayout {
+                alignment: center;
+                if root.version-text != "": Text {
+                    text: root.version-text;
+                    color: AppTheme.text-muted;
+                    font-size: 11px;
+                }
+                if root.path-text != "": Text {
+                    text: root.path-text;
+                    color: AppTheme.text-muted;
+                    font-size: 10px;
+                }
+            }
+
+            // Action / Status Button
+            if root.can-action: Rectangle {
+                height: 30px;
+                background: root.is-checking ? #1e293b : act-touch.has-hover ? AppTheme.accent-hover : AppTheme.accent;
+                border-radius: 5px;
+                animate background { duration: 150ms; }
+
+                act-touch := TouchArea {
+                    enabled: !root.is-checking;
+                    clicked => { root.action-clicked(); }
+                }
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    alignment: center;
+                    Text {
+                        text: root.is-checking ? "Checking..." : "Verify / Detect";
+                        color: #ffffff;
+                        font-size: 11px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            if !root.can-action: Rectangle {
+                height: 28px;
+                background: #111420;
+                border-color: AppTheme.border-subtle;
+                border-width: 1px;
+                border-radius: 5px;
+
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    alignment: center;
+                    Text {
+                        text: "Planned";
+                        color: AppTheme.text-muted;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}

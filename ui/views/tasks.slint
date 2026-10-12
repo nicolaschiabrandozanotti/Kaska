@@ -1,0 +1,87 @@
+import { AppTheme } from "../styles/theme.slint";
+
+export component TasksView inherits Rectangle {
+    in property <int> active-count: 0;
+
+    background: transparent;
+
+    VerticalLayout {
+        padding: 24px;
+        spacing: 20px;
+
+        // Header Card
+        Rectangle {
+            background: AppTheme.bg-card;
+            border-color: AppTheme.border-subtle;
+            border-width: 1px;
+            border-radius: 8px;
+            height: 90px;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 6px;
+
+                Text {
+                    text: "Process & Background Task Manager";
+                    color: AppTheme.text-primary;
+                    font-size: 15px;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: "All tool operations execute asynchronously in background worker threads without freezing the user interface. Subprocesses are managed via structured tokens for safe cancellation.";
+                    color: AppTheme.text-secondary;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        // Main Tasks List or Empty State
+        Rectangle {
+            background: AppTheme.bg-card;
+            border-color: AppTheme.border-subtle;
+            border-width: 1px;
+            border-radius: 8px;
+
+            VerticalLayout {
+                padding: 40px;
+                alignment: center;
+                spacing: 12px;
+
+                Rectangle {
+                    width: 56px;
+                    height: 56px;
+                    border-radius: 28px;
+                    background: #151b2a;
+                    border-color: AppTheme.border-subtle;
+                    border-width: 1px;
+
+                    Text {
+                        text: "📋";
+                        font-size: 24px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Text {
+                    text: "No Background Tasks Running";
+                    color: AppTheme.text-primary;
+                    font-size: 15px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: "Zero automated scans or background tasks are spawned. Tasks only run when you configure a scope and trigger an authorized operation.";
+                    color: AppTheme.text-muted;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    max-width: 480px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}

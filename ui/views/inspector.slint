@@ -1,0 +1,435 @@
+import { AppTheme } from "../styles/theme.slint";
+import { TrafficItem } from "../components/traffic_types.slint";
+
+export component NetworkInspectorView inherits Rectangle {
+    in property <[TrafficItem]> items: [];
+    in-out property <int> selected-index: -1;
+    in property <string> active-req-headers: "";
+    in property <string> active-req-body: "";
+    in property <string> active-resp-headers: "";
+    in property <string> active-resp-body: "";
+    in property <string> active-timing-text: "";
+    callback select-item(int);
+    callback clear-history();
+
+    background: transparent;
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+
+        // Toolbar: Controls & Filters
+        Rectangle {
+            height: 42px;
+            background: AppTheme.bg-card;
+            border-color: AppTheme.border-subtle;
+            border-width: 1px;
+            border-radius: 6px;
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                alignment: space-between;
+
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: center;
+
+                    Text {
+                        text: "HTTP Traffic History";
+                        color: AppTheme.text-primary;
+                        font-size: 13px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle {
+                        width: 1px;
+                        height: 16px;
+                        background: AppTheme.border-subtle;
+                    }
+
+                    Text {
+                        text: items.length > 0 ? (items.length + " transactions captured") : "Listening for requests...";
+                        color: AppTheme.text-muted;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 10px;
+
+                    // Clear history button
+                    clear-btn := Rectangle {
+                        width: 70px;
+                        height: 28px;
+                        background: clear-touch.has-hover ? #374151 : transparent;
+                        border-color: AppTheme.border-subtle;
+                        border-width: 1px;
+                        border-radius: 4px;
+
+                        clear-touch := TouchArea {
+                            clicked => { root.clear-history(); }
+                        }
+
+                        Text {
+                            text: "Clear";
+                            color: AppTheme.text-secondary;
+                            font-size: 11px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Top Half: Traffic Table
+        Rectangle {
+            height: 250px;
+            background: AppTheme.bg-card;
+            border-color: AppTheme.border-subtle;
+            border-width: 1px;
+            border-radius: 6px;
+
+            VerticalLayout {
+                // Table Header
+                Rectangle {
+                    height: 32px;
+                    background: #121520;
+                    border-color: AppTheme.border-subtle;
+                    border-width: 1px;
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 8px;
+
+                        Text { text: "#"; width: 36px; color: AppTheme.text-muted; font-size: 11px; font-weight: 600; vertical-alignment: center; }
+                        Text { text: "Method"; width: 65px; color: AppTheme.text-muted; font-size: 11px; font-weight: 600; vertical-alignment: center; }
+                        Text { text: "Status"; width: 65px; color: AppTheme.text-muted; font-size: 11px; font-weight: 600; vertical-alignment: center; }
+                        Text { text: "Host"; width: 140px; color: AppTheme.text-muted; font-size: 11px; font-weight: 600; vertical-alignment: center; }
+                        Text { text: "Path"; horizontal-stretch: 1; color: AppTheme.text-muted; font-size: 11px; font-weight: 600; vertical-alignment: center; }
+                        Text { text: "Latency"; width: 70px; color: AppTheme.text-muted; font-size: 11px; font-weight: 600; vertical-alignment: center; }
+                        Text { text: "Size"; width: 65px; color: AppTheme.text-muted; font-size: 11px; font-weight: 600; vertical-alignment: center; }
+                        Text { text: "Content Type"; width: 140px; color: AppTheme.text-muted; font-size: 11px; font-weight: 600; vertical-alignment: center; }
+                    }
+                }
+
+                // Table Rows or Empty State
+                if root.items.length == 0: Rectangle {
+                    background: transparent;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 6px;
+                        Text {
+                            text: "No HTTP traffic captured yet";
+                            color: AppTheme.text-muted;
+                            font-size: 13px;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: "Configure your browser or client to use proxy 127.0.0.1:8080, or click 'Test Local Capture' in the header.";
+                            color: #475569;
+                            font-size: 11px;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                if root.items.length > 0: Flickable {
+                    content-height: root.items.length * 32px;
+                    VerticalLayout {
+                        alignment: start;
+                        for item[idx] in root.items: Rectangle {
+                        height: 32px;
+                        background: root.selected-index == idx ? AppTheme.bg-row-selected :
+                                    row-touch.has-hover ? AppTheme.bg-row-hover :
+                                    (Math.mod(idx, 2) == 0 ? #171b29 : #1a1e2e);
+
+                        row-touch := TouchArea {
+                            clicked => {
+                                root.selected-index = idx;
+                                root.select-item(idx);
+                            }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 8px;
+
+                            Text {
+                                text: item.id;
+                                width: 36px;
+                                color: AppTheme.text-muted;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+
+                            // Method badge
+                            HorizontalLayout {
+                                width: 65px;
+                                alignment: start;
+                                Rectangle {
+                                    height: 20px;
+                                    border-radius: 3px;
+                                    background: item.method == "GET" ? #064e3b :
+                                                item.method == "POST" ? #1e3a8a :
+                                                item.method == "PUT" ? #78350f : #7f1d1d;
+                                    HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 6px;
+                                        alignment: center;
+                                        Text {
+                                            text: item.method;
+                                            color: item.method == "GET" ? #a7f3d0 :
+                                                   item.method == "POST" ? #bfdbfe :
+                                                   item.method == "PUT" ? #fde68a : #fecaca;
+                                            font-size: 10px;
+                                            font-weight: 700;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Status Code
+                            Text {
+                                text: item.status-code > 0 ? (item.status-code + " " + item.status-text) : "Pending";
+                                width: 65px;
+                                color: item.status-code >= 200 && item.status-code < 300 ? AppTheme.success :
+                                       item.status-code >= 300 && item.status-code < 400 ? AppTheme.info :
+                                       item.status-code >= 400 && item.status-code < 500 ? AppTheme.warning :
+                                       item.status-code >= 500 ? AppTheme.danger : AppTheme.text-muted;
+                                font-size: 11px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: item.host;
+                                width: 140px;
+                                color: AppTheme.text-secondary;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            Text {
+                                text: item.path;
+                                horizontal-stretch: 1;
+                                color: AppTheme.text-primary;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            Text {
+                                text: item.duration-ms + " ms";
+                                width: 70px;
+                                color: AppTheme.text-muted;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: item.size-bytes + " B";
+                                width: 65px;
+                                color: AppTheme.text-muted;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: item.content-type;
+                                width: 140px;
+                                color: AppTheme.text-muted;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        }
+
+        // Bottom Half: Detailed Inspection (Request vs Response)
+        HorizontalLayout {
+            spacing: 12px;
+
+            // Request Inspector Panel
+            Rectangle {
+                width: 50%;
+                background: AppTheme.bg-card;
+                border-color: AppTheme.border-subtle;
+                border-width: 1px;
+                border-radius: 6px;
+
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text {
+                            text: "Request Inspection";
+                            color: AppTheme.text-primary;
+                            font-size: 12px;
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: "Raw Protocol";
+                            color: AppTheme.text-muted;
+                            font-size: 11px;
+                        }
+                    }
+
+                    Rectangle {
+                        height: 1px;
+                        background: AppTheme.border-subtle;
+                    }
+
+                    // Request Headers View
+                    Text {
+                        text: "Headers:";
+                        color: AppTheme.text-secondary;
+                        font-size: 11px;
+                        font-weight: 600;
+                    }
+
+                    Rectangle {
+                        height: 100px;
+                        background: AppTheme.bg-input;
+                        border-radius: 4px;
+
+                        Flickable {
+                            content-height: 200px;
+                            Text {
+                                text: root.active-req-headers != "" ? root.active-req-headers : "(Select a request to view headers)";
+                                color: AppTheme.text-secondary;
+                                font-size: 11px;
+                                font-family: "Consolas";
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    // Request Body View
+                    Text {
+                        text: "Body Payload:";
+                        color: AppTheme.text-secondary;
+                        font-size: 11px;
+                        font-weight: 600;
+                    }
+
+                    Rectangle {
+                        height: 70px;
+                        background: AppTheme.bg-input;
+                        border-radius: 4px;
+
+                        Flickable {
+                            content-height: 120px;
+                            Text {
+                                text: root.active-req-body != "" ? root.active-req-body : "(Empty body)";
+                                color: AppTheme.text-secondary;
+                                font-size: 11px;
+                                font-family: "Consolas";
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Response Inspector Panel
+            Rectangle {
+                width: 50%;
+                background: AppTheme.bg-card;
+                border-color: AppTheme.border-subtle;
+                border-width: 1px;
+                border-radius: 6px;
+
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text {
+                            text: "Response Inspection";
+                            color: AppTheme.text-primary;
+                            font-size: 12px;
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: root.active-timing-text != "" ? root.active-timing-text : "Awaiting selection";
+                            color: AppTheme.accent;
+                            font-size: 11px;
+                            font-weight: 600;
+                        }
+                    }
+
+                    Rectangle {
+                        height: 1px;
+                        background: AppTheme.border-subtle;
+                    }
+
+                    // Response Headers View
+                    Text {
+                        text: "Headers:";
+                        color: AppTheme.text-secondary;
+                        font-size: 11px;
+                        font-weight: 600;
+                    }
+
+                    Rectangle {
+                        height: 100px;
+                        background: AppTheme.bg-input;
+                        border-radius: 4px;
+
+                        Flickable {
+                            content-height: 200px;
+                            Text {
+                                text: root.active-resp-headers != "" ? root.active-resp-headers : "(Select a request to view headers)";
+                                color: AppTheme.text-secondary;
+                                font-size: 11px;
+                                font-family: "Consolas";
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    // Response Body View
+                    Text {
+                        text: "Response Body:";
+                        color: AppTheme.text-secondary;
+                        font-size: 11px;
+                        font-weight: 600;
+                    }
+
+                    Rectangle {
+                        height: 70px;
+                        background: AppTheme.bg-input;
+                        border-radius: 4px;
+
+                        Flickable {
+                            content-height: 120px;
+                            Text {
+                                text: root.active-resp-body != "" ? root.active-resp-body : "(Empty body)";
+                                color: AppTheme.text-secondary;
+                                font-size: 11px;
+                                font-family: "Consolas";
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

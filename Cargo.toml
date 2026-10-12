@@ -1,0 +1,18 @@
+[package]
+name = "sentinel-desktop"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sentinel Engineering Team"]
+description = "Native desktop security and network audit platform"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+slint = "1.18.1"
+thiserror = "2.0"
+regex = "1.11"
+
+[build-dependencies]
+slint-build = "1.18.1"
+
+[dev-dependencies]
+tempfile = "3.17"

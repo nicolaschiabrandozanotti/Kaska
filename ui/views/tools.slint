@@ -1,0 +1,163 @@
+import { AppTheme } from "../styles/theme.slint";
+import { ToolCard } from "../components/tool_card.slint";
+
+export component ToolsView inherits Rectangle {
+    in property <string> nmap-status: "Checking";
+    in property <string> nmap-version: "Detecting...";
+    in property <string> nmap-path: "";
+    in property <bool> nmap-ready: false;
+    in property <bool> nmap-missing: false;
+    in property <bool> nmap-checking: false;
+    callback check-nmap();
+
+    background: transparent;
+
+    Flickable {
+        content-height: 720px;
+
+        VerticalLayout {
+            padding: 24px;
+            spacing: 20px;
+
+            // Header summary
+            Rectangle {
+                background: AppTheme.bg-card;
+                border-color: AppTheme.border-subtle;
+                border-width: 1px;
+                border-radius: 8px;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 6px;
+
+                    Text {
+                        text: "Security Tool Catalog & Integrations";
+                        color: AppTheme.text-primary;
+                        font-size: 15px;
+                        font-weight: 700;
+                    }
+
+                    Text {
+                        text: "External tools must be pre-installed on the host system. The platform will never attempt background auto-installations. Planned modules will become active as implementation progresses in future milestones.";
+                        color: AppTheme.text-secondary;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            // Grid of tools: 2 columns
+            // Row 1: Nmap (Real) & Burp Proxy (Planned Native)
+            HorizontalLayout {
+                spacing: 16px;
+
+                ToolCard {
+                    width: 50%;
+                    tool-name: "Nmap Network Scanner";
+                    category: "Network Discovery & Auditing";
+                    icon: "📡";
+                    description: "Industry-standard network discovery, port scanning, and OS detection engine. Execution is isolated and controlled via structured arguments.";
+                    status-text: root.nmap-status;
+                    version-text: root.nmap-version;
+                    path-text: root.nmap-path;
+                    is-ready: root.nmap-ready;
+                    is-missing: root.nmap-missing;
+                    is-checking: root.nmap-checking;
+                    is-planned: false;
+                    can-action: true;
+                    action-clicked => { root.check-nmap(); }
+                }
+
+                ToolCard {
+                    width: 50%;
+                    tool-name: "Intercepting HTTP/HTTPS Proxy";
+                    category: "Web Application Inspection";
+                    icon: "🌐";
+                    description: "Built-in native Rust proxy engine featuring live traffic interception, request modification, and Repeater capabilities (Planned for Milestone 1).";
+                    status-text: "Planned (Native)";
+                    version-text: "Rust Hyper / Tokio Stack";
+                    path-text: "Internal Subsystem";
+                    is-ready: false;
+                    is-missing: false;
+                    is-checking: false;
+                    is-planned: true;
+                    can-action: false;
+                }
+            }
+
+            // Row 2: ffuf & Gobuster
+            HorizontalLayout {
+                spacing: 16px;
+
+                ToolCard {
+                    width: 50%;
+                    tool-name: "ffuf Fast Web Fuzzer";
+                    category: "Resource Discovery";
+                    icon: "⚡";
+                    description: "High-performance web fuzzer for directory, parameter, and vhost discovery. (Roadmap candidate).";
+                    status-text: "Roadmap";
+                    version-text: "External Binary Adapter";
+                    path-text: "Not wired in Milestone 0";
+                    is-ready: false;
+                    is-missing: false;
+                    is-checking: false;
+                    is-planned: true;
+                    can-action: false;
+                }
+
+                ToolCard {
+                    width: 50%;
+                    tool-name: "Gobuster";
+                    category: "Resource Discovery & DNS";
+                    icon: "🔍";
+                    description: "Directory, DNS subdomain and virtual host enumeration tool written in Go. (Roadmap candidate).";
+                    status-text: "Roadmap";
+                    version-text: "External Binary Adapter";
+                    path-text: "Not wired in Milestone 0";
+                    is-ready: false;
+                    is-missing: false;
+                    is-checking: false;
+                    is-planned: true;
+                    can-action: false;
+                }
+            }
+
+            // Row 3: Metasploit & Hashcat
+            HorizontalLayout {
+                spacing: 16px;
+
+                ToolCard {
+                    width: 50%;
+                    tool-name: "Metasploit Framework";
+                    category: "Exploitation & Verification";
+                    icon: "🎯";
+                    description: "Penetration testing and exploit verification platform. Integrates via MSF RPC interface. (Roadmap candidate).";
+                    status-text: "Roadmap";
+                    version-text: "RPC Integration Adapter";
+                    path-text: "Not wired in Milestone 0";
+                    is-ready: false;
+                    is-missing: false;
+                    is-checking: false;
+                    is-planned: true;
+                    can-action: false;
+                }
+
+                ToolCard {
+                    width: 50%;
+                    tool-name: "Hashcat & John the Ripper";
+                    category: "Password & Hash Auditing";
+                    icon: "🔑";
+                    description: "Advanced hash recovery tools for offline authorized security assessments. (Roadmap candidate).";
+                    status-text: "Roadmap";
+                    version-text: "External Process Adapter";
+                    path-text: "Not wired in Milestone 0";
+                    is-ready: false;
+                    is-missing: false;
+                    is-checking: false;
+                    is-planned: true;
+                    can-action: false;
+                }
+            }
+        }
+    }
+}

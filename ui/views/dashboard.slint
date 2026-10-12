@@ -1,0 +1,300 @@
+import { AppTheme } from "../styles/theme.slint";
+
+component MetricCard inherits Rectangle {
+    in property <string> icon: "📈";
+    in property <string> title: "";
+    in property <string> value: "";
+    in property <string> subtitle: "";
+    in property <color> accent-color: AppTheme.accent;
+
+    background: AppTheme.bg-card;
+    border-color: AppTheme.border-subtle;
+    border-width: 1px;
+    border-radius: 8px;
+    height: 100px;
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 6px;
+
+        HorizontalLayout {
+            alignment: space-between;
+            Text {
+                text: root.title;
+                color: AppTheme.text-muted;
+                font-size: 12px;
+                font-weight: 500;
+            }
+            Text {
+                text: root.icon;
+                font-size: 14px;
+            }
+        }
+
+        Text {
+            text: root.value;
+            color: AppTheme.text-primary;
+            font-size: 20px;
+            font-weight: 700;
+        }
+
+        Text {
+            text: root.subtitle;
+            color: root.accent-color;
+            font-size: 11px;
+        }
+    }
+}
+
+export component DashboardView inherits Rectangle {
+    in property <string> nmap-status-text: "Checking...";
+    in property <string> nmap-version: "N/A";
+    in property <bool> nmap-installed: false;
+    callback go-to-tools();
+
+    background: transparent;
+
+    Flickable {
+        content-height: 560px;
+
+        VerticalLayout {
+            padding: 24px;
+            spacing: 20px;
+
+            // Overview Metric Cards
+            HorizontalLayout {
+                spacing: 16px;
+
+                MetricCard {
+                    icon: "🛡";
+                    title: "EXECUTION ENGINE";
+                    value: "Native Monolith";
+                    subtitle: "Zero background daemons";
+                    accent-color: AppTheme.info;
+                }
+
+                MetricCard {
+                    icon: "📡";
+                    title: "NETWORK SCANNER (NMAP)";
+                    value: root.nmap-installed ? "Detected" : "Not Found";
+                    subtitle: root.nmap-installed ? root.nmap-version : "Binary not in PATH";
+                    accent-color: root.nmap-installed ? AppTheme.success : AppTheme.warning;
+                }
+
+                MetricCard {
+                    icon: "⚡";
+                    title: "ACTIVE TASKS";
+                    value: "0 Running";
+                    subtitle: "User confirmation required";
+                    accent-color: AppTheme.text-secondary;
+                }
+
+                MetricCard {
+                    icon: "🔒";
+                    title: "AUDIT SCOPE";
+                    value: "Enforced";
+                    subtitle: "No automatic attacks";
+                    accent-color: AppTheme.success;
+                }
+            }
+
+            // Ethical / Operational Guidelines Banner
+            Rectangle {
+                background: #111b27;
+                border-color: #1e3a5f;
+                border-width: 1px;
+                border-radius: 8px;
+
+                VerticalLayout {
+                    padding: 18px;
+                    spacing: 8px;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+
+                        Text {
+                            text: "⚠️";
+                            font-size: 16px;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: "Operational Security and Ethical Scope Policy";
+                            color: #93c5fd;
+                            font-size: 14px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Text {
+                        text: "This platform is built exclusively for authorized penetration tests, controlled lab environments, CTF challenges, and infrastructure audits with explicit consent. In accordance with platform design principles, no scans, payloads, or intrusive commands are ever executed automatically upon launching the application or switching tabs. All operations require explicit target definition and manual user initiation.";
+                        color: AppTheme.text-secondary;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            // Quick Actions & Roadmap Status
+            HorizontalLayout {
+                spacing: 16px;
+
+                // Environment Status Box
+                Rectangle {
+                    background: AppTheme.bg-card;
+                    border-color: AppTheme.border-subtle;
+                    border-width: 1px;
+                    border-radius: 8px;
+                    width: 50%;
+
+                    VerticalLayout {
+                        padding: 18px;
+                        spacing: 12px;
+
+                        Text {
+                            text: "Toolchain & Integration Health";
+                            color: AppTheme.text-primary;
+                            font-size: 14px;
+                            font-weight: 600;
+                        }
+
+                        VerticalLayout {
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text {
+                                    text: "Nmap Network Scanner:";
+                                    color: AppTheme.text-secondary;
+                                    font-size: 12px;
+                                }
+                                Text {
+                                    text: root.nmap-installed ? ("Ready (" + root.nmap-version + ")") : "Missing / Unconfigured";
+                                    color: root.nmap-installed ? AppTheme.success : AppTheme.warning;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text {
+                                    text: "Intercepting Proxy Engine:";
+                                    color: AppTheme.text-secondary;
+                                    font-size: 12px;
+                                }
+                                Text {
+                                    text: "Planned (Native Rust)";
+                                    color: AppTheme.text-muted;
+                                    font-size: 12px;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text {
+                                    text: "Fuzzing Engine (ffuf / gobuster):";
+                                    color: AppTheme.text-secondary;
+                                    font-size: 12px;
+                                }
+                                Text {
+                                    text: "Planned";
+                                    color: AppTheme.text-muted;
+                                    font-size: 12px;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text {
+                                    text: "Credential Analysis (hashcat / john):";
+                                    color: AppTheme.text-secondary;
+                                    font-size: 12px;
+                                }
+                                Text {
+                                    text: "Planned";
+                                    color: AppTheme.text-muted;
+                                    font-size: 12px;
+                                }
+                            }
+                        }
+
+                        // Action button
+                        view-tools-btn := Rectangle {
+                            height: 34px;
+                            background: view-touch.has-hover ? AppTheme.accent-hover : AppTheme.accent;
+                            border-radius: 6px;
+                            animate background { duration: 150ms; }
+
+                            view-touch := TouchArea {
+                                clicked => { root.go-to-tools(); }
+                            }
+
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 8px;
+                                Text {
+                                    text: "Open Tools Catalog ➔";
+                                    color: #ffffff;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Architecture and Performance Box
+                Rectangle {
+                    background: AppTheme.bg-card;
+                    border-color: AppTheme.border-subtle;
+                    border-width: 1px;
+                    border-radius: 8px;
+                    width: 50%;
+
+                    VerticalLayout {
+                        padding: 18px;
+                        spacing: 12px;
+
+                        Text {
+                            text: "Platform Architecture (Hito 0)";
+                            color: AppTheme.text-primary;
+                            font-size: 14px;
+                            font-weight: 600;
+                        }
+
+                        Text {
+                            text: "• Built purely in Rust with native Slint rendering\n• Zero WebViews, Chromium or Node runtimes\n• Strict non-blocking background workers\n• Structured process execution (no shell interpolation)\n• Clean separation between Core, Execution and UI";
+                            color: AppTheme.text-secondary;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+
+                        Rectangle {
+                            height: 1px;
+                            background: AppTheme.border-subtle;
+                        }
+
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text {
+                                text: "GUI Memory Footprint:";
+                                color: AppTheme.text-muted;
+                                font-size: 11px;
+                            }
+                            Text {
+                                text: "< 25 MB RAM (native compiled)";
+                                color: AppTheme.success;
+                                font-size: 11px;
+                                font-weight: 600;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

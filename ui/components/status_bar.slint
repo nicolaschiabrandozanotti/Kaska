@@ -1,0 +1,90 @@
+import { AppTheme } from "../styles/theme.slint";
+
+export component StatusBar inherits Rectangle {
+    in property <string> status-text: "Ready";
+    in property <string> os-info: "Windows x86_64";
+    in property <int> transactions-count: 0;
+    in property <string> license-info: "Built with Slint • Open Source / Royalty-Free Compatible";
+
+    height: 30px;
+    background: #090b10;
+    border-color: AppTheme.border-subtle;
+    border-width: 1px;
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 20px;
+        alignment: space-between;
+
+        // Left side: Status indicator and message
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: center;
+
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: AppTheme.success;
+            }
+
+            Text {
+                text: root.status-text;
+                color: AppTheme.text-secondary;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+        }
+
+        // Right side: Captured Count, Platform, License
+        HorizontalLayout {
+            spacing: 20px;
+            alignment: center;
+
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: center;
+                Text {
+                    text: "Captured:";
+                    color: AppTheme.text-muted;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.transactions-count > 0 ? (root.transactions-count + " requests") : "0 requests";
+                    color: root.transactions-count > 0 ? AppTheme.accent : AppTheme.text-secondary;
+                    font-size: 11px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+            }
+
+            Rectangle {
+                width: 1px;
+                height: 14px;
+                background: AppTheme.border-subtle;
+            }
+
+            Text {
+                text: root.os-info;
+                color: AppTheme.text-muted;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                width: 1px;
+                height: 14px;
+                background: AppTheme.border-subtle;
+            }
+
+            Text {
+                text: root.license-info;
+                color: AppTheme.text-muted;
+                font-size: 10px;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
