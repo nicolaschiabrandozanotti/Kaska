@@ -34,11 +34,29 @@ jobs:
       RUST_BACKTRACE: "1"
 
     steps:
+      # Supply-chain hardening: GitHub Actions are pinned to verified full-length commit SHAs.
+      # Note: Immutable SHA pins require periodic maintenance to incorporate upstream security updates.
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate GitHub Actions workflows (actionlint)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACTIONLINT_VERSION="1.7.12"
+          ACTIONLINT_SHA256="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+          ACTIONLINT_URL="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          WORK_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/actionlint.XXXXXX")"
+          trap 'rm -rf "$WORK_DIR"' EXIT
+          ARCHIVE_PATH="${WORK_DIR}/actionlint.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 "$ACTIONLINT_URL" -o "$ARCHIVE_PATH"
+          echo "${ACTIONLINT_SHA256}  ${ARCHIVE_PATH}" | sha256sum --check --strict
+          tar -xzf "$ARCHIVE_PATH" -C "$WORK_DIR" actionlint
+          "${WORK_DIR}/actionlint" -color .github/workflows/*.yml
 
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           components: rustfmt, clippy
 
