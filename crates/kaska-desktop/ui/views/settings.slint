@@ -1,3 +1,4 @@
+import { AboutSlint } from "std-widgets.slint";
 import { AppTheme } from "../styles/theme.slint";
 
 export component SettingsView inherits Rectangle {
@@ -9,11 +10,12 @@ export component SettingsView inherits Rectangle {
     background: transparent;
 
     Flickable {
-        content-height: 640px;
+        content-height: 750px;
 
         VerticalLayout {
             padding: 20px;
             spacing: 16px;
+            alignment: start;
 
             // Section 1: Network Engine Configuration
             Rectangle {
@@ -139,7 +141,7 @@ export component SettingsView inherits Rectangle {
 
                 VerticalLayout {
                     padding: 18px;
-                    spacing: 10px;
+                    spacing: 12px;
 
                     Text {
                         text: "About, Licenses & Open Source Credits";
@@ -149,10 +151,23 @@ export component SettingsView inherits Rectangle {
                     }
 
                     Text {
-                        text: "Kaska is an open-source, free security engineering and education platform built with Rust.\n\n• Purpose: Cybersecurity education, technical research, CTFs, self-hosted labs, and authorized assessments.\n• Native Design: Pure Rust implementations of networking and security capabilities. Zero wrappers around external binaries.\n• Graphical Interface: Built with the Slint GUI toolkit (https://slint.dev) under the Royalty-Free Desktop / GPLv3 licensing terms.\n• Attribution: Special recognition to SixtyFPS GmbH and the Slint community for high-performance desktop rendering.";
+                        text: "Kaska is an open-source, free security engineering and education platform built with Rust.\n\n• Purpose: Cybersecurity education, technical research, CTFs, self-hosted labs, and authorized assessments.\n• Native Design: Pure Rust implementations of networking and security capabilities. Zero wrappers around external binaries.\n• Kaska License: Original source code is dual-licensed under MIT OR Apache-2.0.\n• Slint License: Graphical interface built with the Slint GUI toolkit (https://slint.dev) under the Slint Royalty-Free Desktop, Mobile, and Web Applications License 2.0.\n• Slint Copyright: Copyright © SixtyFPS GmbH.";
                         color: AppTheme.text-secondary;
                         font-size: 12px;
                         wrap: word-wrap;
+                    }
+
+                    Rectangle {
+                        height: 156px;
+                        background: AppTheme.bg-surface;
+                        border-color: AppTheme.border-subtle;
+                        border-width: 1px;
+                        border-radius: 6px;
+
+                        AboutSlint {
+                            width: 100%;
+                            height: 100%;
+                        }
                     }
 
                     Rectangle {
@@ -168,7 +183,7 @@ export component SettingsView inherits Rectangle {
                             font-size: 11px;
                         }
                         Text {
-                            text: "GitHub Open Source Ready • Free for Community & Education";
+                            text: "GitHub Open Source Ready • Dual-Licensed (MIT OR Apache-2.0)";
                             color: AppTheme.accent;
                             font-size: 11px;
                             font-weight: 600;
