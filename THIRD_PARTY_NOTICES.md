@@ -42,3 +42,12 @@ Kaska depends on third-party software and libraries that remain under their resp
 ## 3. Transitive Dependencies
 
 All transitive Cargo dependencies resolved in `Cargo.lock` remain governed by their respective upstream open-source licenses as published on [crates.io](https://crates.io). You can inspect the complete dependency graph and license metadata locally using `cargo metadata`.
+
+## Lucide SVG icons
+
+- Source: https://github.com/lucide-icons/lucide/tree/440a1e1dfb1e712505308da46bead3c28b1f1398/icons
+- Copyright (c) 2026 Lucide Icons and Contributors. ISC license.
+- Feather-derived icons retain Copyright (c) 2013-present Cole Bemis and MIT license.
+- Complete ISC and MIT terms: `crates/kaska-desktop/ui/assets/icons/LICENSE`.
+- Vendored files: network, repeat (stored as repeat-2), shield-check, settings, play, square, flask-conical, trash (stored as trash-2).
+- Modification: currentColor replaced with white; Slint applies the neutral theme through Image.colorize. No icon runtime dependency.

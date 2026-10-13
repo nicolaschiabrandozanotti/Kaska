@@ -1,4 +1,6 @@
+import { Palette } from "std-widgets.slint";
 import { AppTheme } from "styles/theme.slint";
+export { AppTheme } from "styles/theme.slint";
 import { TrafficItem } from "components/traffic_types.slint";
 import { Sidebar } from "components/sidebar.slint";
 import { Header } from "components/header.slint";
@@ -10,11 +12,27 @@ import { SettingsView } from "views/settings.slint";
 
 export component AppWindow inherits Window {
     title: "Kaska — Native Security & Network Inspection Platform";
-    min-width: 1080px;
-    min-height: 720px;
-    preferred-width: 1200px;
-    preferred-height: 780px;
+    min-width: 640px;
+    min-height: 300px;
+    max-width: 65535px;
+    max-height: 65535px;
+    preferred-width: 1180px;
+    preferred-height: 680px;
     background: AppTheme.bg-base;
+    // Geometry is sampled on resize to avoid intrinsic-layout feedback in Slint 1.18.1.
+    private property <length> view-width: 1180px;
+    private property <length> view-height: 680px;
+    changed width => { root.view-width = root.width; }
+    changed height => { root.view-height = root.height; }
+    init => { Palette.color-scheme = ColorScheme.dark; root.view-width = root.width; root.view-height = root.height; }
+
+    default-font-size: 14px;
+    default-font-family: "sans-serif";
+    in-out property <bool> request-body-tab;
+    in-out property <bool> response-body-tab;
+    in-out property <bool> show-response;
+    in-out property <bool> show-details;
+    in-out property <float> table-ratio: 0.4;
 
     // Navigation
     in-out property <int> active-tab: 0;
@@ -44,65 +62,86 @@ export component AppWindow inherits Window {
     callback select-transaction(int);
     callback clear-history();
 
-    HorizontalLayout {
-        // Navigation Sidebar
-        Sidebar {
+    // Do not let the anchored shell impose its current size as a window minimum.
+    Rectangle {
+        min-width: 0px;
+        min-height: 0px;
+        max-width: 65535px;
+        max-height: 65535px;
+        // The shell is anchored to the window, not to child content minima.
+        // Responsive child layouts must not feed back into the window width.
+        sidebar := Sidebar {
+            x: 0px;
+            y: 0px;
+            height: root.view-height;
             active-tab: root.active-tab;
-            select-tab(idx) => {
-                root.active-tab = idx;
-            }
+            compact: root.view-width < 1050px;
+            select-tab(idx) => { root.active-tab = idx; }
         }
-
-        // Main Column
-        VerticalLayout {
-            // Header
-            Header {
-                title: root.active-tab == 0 ? "Network Inspector" :
-                       root.active-tab == 1 ? "HTTP Repeater" :
-                       root.active-tab == 2 ? "Target Scope" : "Settings & About";
-                subtitle: root.active-tab == 0 ? "Real-time HTTP traffic capture, header inspection and timing analysis" :
-                          root.active-tab == 1 ? "Manual request composer and replay engine (Milestone 1 foundation)" :
-                          root.active-tab == 2 ? "In-scope authorized target definitions and ethical boundary rules" :
-                          "Local proxy listener ports, diagnostics, and Slint open-source credits";
-                proxy-addr: root.proxy-addr;
-                proxy-running: root.proxy-running;
-                is-sending-test: root.is-sending-test;
-                toggle-proxy => { root.toggle-proxy(); }
-                send-test-traffic => { root.send-test-traffic(); }
-            }
-
-            // View Content
-            Rectangle {
-                background: AppTheme.bg-base;
-
-                if root.active-tab == 0: NetworkInspectorView {
-                    items: root.transactions;
-                    selected-index <=> root.selected-transaction-idx;
-                    active-req-headers: root.active-req-headers;
-                    active-req-body: root.active-req-body;
-                    active-resp-headers: root.active-resp-headers;
-                    active-resp-body: root.active-resp-body;
-                    active-timing-text: root.active-timing-text;
-                    select-item(idx) => { root.select-transaction(idx); }
-                    clear-history => { root.clear-history(); }
+        Rectangle {
+            x: sidebar.width;
+            y: 0px;
+            width: root.view-width - sidebar.width;
+            height: root.view-height;
+            clip: true;
+            // Main Column
+            VerticalLayout {
+                // Header
+                Header {
+                    title: root.active-tab == 0 ? "Network Inspector" :
+                    root.active-tab == 1 ? "HTTP Repeater" :
+                    root.active-tab == 2 ? "Target Scope" : "Settings & About";
+                    subtitle: root.active-tab == 0 ? "Real-time HTTP traffic capture, header inspection and timing analysis" :
+                    root.active-tab == 1 ? "Manual request composer and replay engine (Milestone 1 foundation)" :
+                    root.active-tab == 2 ? "In-scope authorized target definitions and ethical boundary rules" :
+                    "Local proxy listener ports, diagnostics, and Slint open-source credits";
+                    proxy-addr: root.proxy-addr;
+                    proxy-running: root.proxy-running;
+                    is-sending-test: root.is-sending-test;
+                    toggle-proxy => { root.toggle-proxy(); }
+                    send-test-traffic => { root.send-test-traffic(); }
                 }
 
-                if root.active-tab == 1: RepeaterView {}
+                // View Content
+                Rectangle {
+                    background: AppTheme.bg-base;
 
-                if root.active-tab == 2: ScopeView {}
+                    if root.active-tab == 0: NetworkInspectorView {
+                        proxy-running: root.proxy-running;
+                        proxy-addr: root.proxy-addr;
+                        request-body-tab <=> root.request-body-tab;
+                        response-body-tab <=> root.response-body-tab;
+                        show-response <=> root.show-response;
+                        show-details <=> root.show-details;
+                        table-ratio <=> root.table-ratio;
+                        items: root.transactions;
+                        selected-index <=> root.selected-transaction-idx;
+                        active-req-headers: root.active-req-headers;
+                        active-req-body: root.active-req-body;
+                        active-resp-headers: root.active-resp-headers;
+                        active-resp-body: root.active-resp-body;
+                        active-timing-text: root.active-timing-text;
+                        select-item(idx) => { root.select-transaction(idx); }
+                        clear-history => { root.clear-history(); }
+                    }
 
-                if root.active-tab == 3: SettingsView {
-                    proxy-port: "8080";
-                    test-port: "8989";
+                    if root.active-tab == 1: RepeaterView {}
+
+                    if root.active-tab == 2: ScopeView {}
+
+                    if root.active-tab == 3: SettingsView {
+                        proxy-port: "8080";
+                        test-port: "8989";
+                        os-info: root.os-info;
+                    }
+                }
+
+                // Bottom Status Bar
+                StatusBar {
+                    status-text: root.status-message;
                     os-info: root.os-info;
+                    transactions-count: root.transactions-count;
                 }
-            }
-
-            // Bottom Status Bar
-            StatusBar {
-                status-text: root.status-message;
-                os-info: root.os-info;
-                transactions-count: root.transactions-count;
             }
         }
     }

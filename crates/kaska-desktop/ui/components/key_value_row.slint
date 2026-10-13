@@ -1,0 +1,19 @@
+import { AppTheme } from "../styles/theme.slint";
+
+export component KeyValueRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    private property <bool> compact: root.width < 560px;
+    height: root.compact ? 54px : 32px;
+    if !root.compact: HorizontalLayout {
+        spacing: 16px;
+        Text { text: root.label; color: AppTheme.text-secondary; font-size: 13px; vertical-alignment: center; }
+        Text { text: root.value; color: AppTheme.text-primary; font-size: 13px; vertical-alignment: center; horizontal-alignment: right; }
+    }
+    if root.compact: VerticalLayout {
+        spacing: 4px;
+        alignment: center;
+        Text { text: root.label; color: AppTheme.text-muted; font-size: 12px; }
+        Text { text: root.value; color: AppTheme.text-primary; font-size: 13px; wrap: word-wrap; }
+    }
+}
