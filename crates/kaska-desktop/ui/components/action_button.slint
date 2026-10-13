@@ -1,0 +1,77 @@
+import { AppTheme } from "../styles/theme.slint";
+
+export component ActionButton inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> enabled: true;
+    in property <bool> selected: false;
+    in property <string> description;
+    callback clicked();
+    private property <bool> keyboard-pressed;
+    changed enabled => { root.keyboard-pressed = false; }
+    forward-focus: keys;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-description: root.description;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    min-height: 32px;
+    preferred-height: 32px;
+    max-height: 32px;
+    min-width: content.min-width + 4px;
+    max-width: content.min-width + 4px;
+    horizontal-stretch: 0;
+    border-radius: 4px;
+    border-width: keys.has-focus ? 2px : 1px;
+    border-color: keys.has-focus ? AppTheme.border-focus : AppTheme.border-control;
+    background: !root.enabled ? AppTheme.bg-surface : (pointer.pressed || root.keyboard-pressed) ? AppTheme.control-pressed :
+                root.selected ? AppTheme.bg-row-selected : pointer.has-hover ? AppTheme.bg-row-hover : AppTheme.bg-surface;
+    keys := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return {
+                root.keyboard-pressed = true;
+                return accept;
+            }
+            return reject;
+        }
+        key-released(event) => {
+            if event.text == " " || event.text == Key.Return {
+                if root.keyboard-pressed { root.clicked(); }
+                root.keyboard-pressed = false;
+                return accept;
+            }
+            return reject;
+        }
+        focus-lost(reason) => { root.keyboard-pressed = false; }
+    }
+    pointer := TouchArea {
+        enabled: root.enabled;
+        clicked => { keys.focus(); root.clicked(); }
+    }
+    content := HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 6px;
+        if root.icon != @image-url(""): Rectangle {
+            width: 16px;
+            background: transparent;
+            Image {
+                y: (parent.height - self.height) / 2;
+                width: 16px;
+                height: 16px;
+                source: root.icon;
+                image-fit: contain;
+                colorize: root.enabled ? AppTheme.text-secondary : AppTheme.text-disabled;
+                accessible-role: none;
+            }
+        }
+        Text {
+            text: root.text;
+            color: root.enabled ? AppTheme.text-primary : AppTheme.text-disabled;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+    }
+    if root.description != "": Tooltip { text: @markdown("\{root.description}"); }
+}

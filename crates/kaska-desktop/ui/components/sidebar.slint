@@ -1,175 +1,71 @@
 import { AppTheme } from "../styles/theme.slint";
 
 component NavItem inherits Rectangle {
-    in property <string> icon-text: "";
-    in property <string> label: "";
-    in property <bool> is-active: false;
+    in property <string> label;
+    in property <string> short-label;
+    in property <image> icon;
+    in property <bool> compact;
+    in property <bool> is-active;
     callback clicked();
-
-    height: 44px;
-    border-radius: 6px;
-    background: is-active ? #1e293b : touch-area.has-hover ? #171d2b : transparent;
-    animate background { duration: 150ms; }
-
-    touch-area := TouchArea {
-        clicked => { root.clicked(); }
+    forward-focus: keys;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-description: root.is-active ? "Current tool" : "Open " + root.label;
+    accessible-item-selected: root.is-active;
+    accessible-action-default => { root.clicked(); }
+    min-height: 44px;
+    preferred-height: 44px;
+    background: touch.pressed ? AppTheme.control-pressed : root.is-active ? AppTheme.bg-row-selected : touch.has-hover ? AppTheme.bg-row-hover : transparent;
+    border-radius: 4px;
+    border-width: keys.has-focus ? 2px : 0px;
+    border-color: AppTheme.border-focus;
+    keys := FocusScope {
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
+            return reject;
+        }
     }
-
+    touch := TouchArea { clicked => { keys.focus(); root.clicked(); } }
+    if root.is-active: Rectangle { x: 0px; y: 10px; width: 2px; height: parent.height - 20px; background: AppTheme.text-primary; }
     HorizontalLayout {
-        padding-left: 14px;
-        padding-right: 14px;
-        spacing: 12px;
-        alignment: start;
-
-        if is-active: Rectangle {
-            width: 3px;
-            height: 20px;
-            background: AppTheme.accent;
-            border-radius: 2px;
+        padding-left: 10px;
+        padding-right: 6px;
+        spacing: 8px;
+        Rectangle {
+            width: 18px;
+            background: transparent;
+            Image { y: (parent.height - self.height) / 2; source: root.icon; width: 18px; height: 18px; colorize: AppTheme.text-secondary; accessible-role: none; }
         }
-
-        Text {
-            text: root.icon-text;
-            color: root.is-active ? AppTheme.accent : AppTheme.text-muted;
-            font-size: 15px;
-            vertical-alignment: center;
-        }
-
-        Text {
-            text: root.label;
-            color: root.is-active ? AppTheme.text-primary : AppTheme.text-secondary;
-            font-size: 14px;
-            font-weight: root.is-active ? 600 : 400;
-            vertical-alignment: center;
-        }
+        Text { text: root.compact ? root.short-label : root.label; font-size: 13px; color: AppTheme.text-primary; vertical-alignment: center; }
     }
+    if root.compact: Tooltip { text: @markdown("\{root.label}"); }
 }
 
 export component Sidebar inherits Rectangle {
-    in property <int> active-tab: 0;
+    min-height: 0px;
+    in-out property <int> active-tab;
+    in property <bool> compact;
     callback select-tab(int);
-
-    width: 240px;
+    width: root.compact ? 120px : 192px;
     background: AppTheme.bg-surface;
     border-color: AppTheme.border-subtle;
     border-width: 1px;
-
+    accessible-role: navigation;
+    accessible-label: "Tools";
     VerticalLayout {
-        padding: 16px;
-        spacing: 10px;
-
-        // Branding
-        HorizontalLayout {
-            spacing: 10px;
-            alignment: start;
-            padding-bottom: 12px;
-
-            Rectangle {
-                width: 32px;
-                height: 32px;
-                background: AppTheme.accent;
-                border-radius: 6px;
-
-                Text {
-                    text: "S";
-                    color: #ffffff;
-                    font-size: 18px;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-
-            VerticalLayout {
-                alignment: center;
-                Text {
-                    text: "KASKA";
-                    color: AppTheme.text-primary;
-                    font-size: 14px;
-                    font-weight: 700;
-                    letter-spacing: 1.5px;
-                }
-                Text {
-                    text: "Native Security Suite";
-                    color: AppTheme.text-muted;
-                    font-size: 11px;
-                }
-            }
-        }
-
+        padding: 8px;
+        spacing: 4px;
         Rectangle {
-            height: 1px;
-            background: AppTheme.border-subtle;
+            height: 48px;
+            Text { x: 10px; text: "KASKA"; color: AppTheme.text-primary; font-size: root.compact ? 18px : 23px; font-weight: 700; vertical-alignment: center; }
         }
-
-        // Navigation links
-        VerticalLayout {
-            spacing: 4px;
-            padding-top: 6px;
-
-            NavItem {
-                icon-text: "🌐";
-                label: "Network Inspector";
-                is-active: root.active-tab == 0;
-                clicked => { root.select-tab(0); }
-            }
-
-            NavItem {
-                icon-text: "🔁";
-                label: "HTTP Repeater";
-                is-active: root.active-tab == 1;
-                clicked => { root.select-tab(1); }
-            }
-
-            NavItem {
-                icon-text: "🛡";
-                label: "Target Scope";
-                is-active: root.active-tab == 2;
-                clicked => { root.select-tab(2); }
-            }
-
-            NavItem {
-                icon-text: "⚙";
-                label: "Settings & About";
-                is-active: root.active-tab == 3;
-                clicked => { root.select-tab(3); }
-            }
-        }
-
-        Rectangle {}
-
-        // Footer version & license
-        Rectangle {
-            background: #0f131d;
-            border-radius: 6px;
-            border-color: AppTheme.border-subtle;
-            border-width: 1px;
-            height: 72px;
-
-            VerticalLayout {
-                padding: 10px;
-                spacing: 3px;
-                alignment: center;
-
-                Text {
-                    text: "Sentinel Platform • v0.1.0";
-                    color: AppTheme.text-secondary;
-                    font-size: 11px;
-                    font-weight: 600;
-                }
-
-                Text {
-                    text: "Built with Slint GUI";
-                    color: AppTheme.accent;
-                    font-size: 11px;
-                }
-
-                Text {
-                    text: "Authorized Audits Only";
-                    color: AppTheme.warning;
-                    font-size: 10px;
-                }
-            }
-        }
+        NavItem { label: "Network Inspector"; short-label: "Inspector"; icon: @image-url("../assets/icons/network.svg"); compact: root.compact; is-active: root.active-tab == 0; clicked => { root.select-tab(0); } }
+        NavItem { label: "HTTP Repeater"; short-label: "Repeater"; icon: @image-url("../assets/icons/repeat-2.svg"); compact: root.compact; is-active: root.active-tab == 1; clicked => { root.select-tab(1); } }
+        NavItem { label: "Target Scope"; short-label: "Scope"; icon: @image-url("../assets/icons/shield-check.svg"); compact: root.compact; is-active: root.active-tab == 2; clicked => { root.select-tab(2); } }
+        NavItem { label: "Settings & About"; short-label: "Settings"; icon: @image-url("../assets/icons/settings.svg"); compact: root.compact; is-active: root.active-tab == 3; clicked => { root.select-tab(3); } }
+        Rectangle { vertical-stretch: 1; }
+        if root.height > 420px: Text { text: "Kaska v0.1.0"; color: AppTheme.text-muted; font-size: 12px; }
+        if root.height > 420px: Text { text: "Built with Slint"; color: AppTheme.text-muted; font-size: 12px; }
+        if root.height > 420px: Text { text: "Authorized audits only"; color: AppTheme.text-muted; font-size: 12px; wrap: word-wrap; }
     }
 }

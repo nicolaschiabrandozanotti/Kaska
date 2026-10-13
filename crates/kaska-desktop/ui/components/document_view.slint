@@ -1,0 +1,94 @@
+import { ActionButton } from "action_button.slint";
+import { ScrollView } from "std-widgets.slint";
+import { AppTheme } from "../styles/theme.slint";
+
+export component DocumentView inherits Rectangle {
+    in property <string> text;
+    in property <string> label;
+    in property <string> empty-text: "Empty body";
+    forward-focus: document;
+    background: AppTheme.bg-input;
+    border-color: document.has-focus ? AppTheme.border-focus : AppTheme.border-subtle;
+    border-width: document.has-focus ? 2px : 1px;
+    border-radius: 4px;
+    scroll := ScrollView {
+        x: 8px;
+        y: 8px;
+        width: parent.width - 16px;
+        height: parent.height - 16px;
+        content-width: max(self.visible-width, document.preferred-width);
+        content-height: max(self.visible-height, document.preferred-height);
+        document := TextInput {
+            text: root.text == "" ? root.empty-text : root.text;
+            read-only: true;
+            single-line: false;
+            wrap: no-wrap;
+            width: scroll.content-width;
+            height: scroll.content-height;
+            font-family: AppTheme.mono-font;
+            font-size: 13px;
+            color: root.text == "" ? AppTheme.text-muted : AppTheme.text-secondary;
+            selection-background-color: AppTheme.bg-row-selected;
+            selection-foreground-color: AppTheme.text-primary;
+            page-height: scroll.visible-height;
+            accessible-label: root.label;
+            accessible-read-only: true;
+            cursor-position-changed(pos) => {
+                if pos.y + scroll.content-y < 0px {
+                    scroll.content-y = min(0px, -pos.y);
+                } else if pos.y + scroll.content-y > scroll.visible-height - 20px {
+                    scroll.content-y = min(0px, scroll.visible-height - pos.y - 20px);
+                }
+                if pos.x + scroll.content-x < 0px {
+                    scroll.content-x = min(0px, -pos.x);
+                } else if pos.x + scroll.content-x > scroll.visible-width {
+                    scroll.content-x = min(0px, scroll.visible-width - pos.x);
+                }
+            }
+        }
+    }
+}
+
+export component DocumentPanel inherits Rectangle {
+    in property <string> title;
+    in property <string> summary;
+    in property <string> headers;
+    in property <string> body;
+    in property <bool> has-selection;
+    in-out property <bool> body-tab: false;
+    background: AppTheme.bg-card;
+    border-color: AppTheme.border-subtle;
+    border-width: 1px;
+    border-radius: 4px;
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+        HorizontalLayout {
+            min-height: 24px;
+            Text { text: root.title; color: AppTheme.text-primary; font-size: 14px; font-weight: 600; }
+            Text { text: root.has-selection ? root.summary : ""; color: AppTheme.text-secondary; font-size: 12px; overflow: elide; horizontal-alignment: right; }
+        }
+        FocusScope {
+            height: 32px;
+            focus-on-tab-navigation: false;
+            accessible-role: tab-list;
+            accessible-label: root.title + " sections";
+            key-pressed(event) => {
+                if event.text == Key.LeftArrow { root.body-tab = false; headers-tab.focus(); return accept; }
+                if event.text == Key.RightArrow { root.body-tab = true; body-tab.focus(); return accept; }
+                return reject;
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                headers-tab := ActionButton { text: "Headers"; selected: !root.body-tab; accessible-role: tab; accessible-item-selected: !root.body-tab; clicked => { root.body-tab = false; } }
+                body-tab := ActionButton { text: "Body"; selected: root.body-tab; accessible-role: tab; accessible-item-selected: root.body-tab; clicked => { root.body-tab = true; } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
+        DocumentView {
+            label: root.title + (root.body-tab ? " body" : " headers");
+            text: !root.has-selection ? "" : root.body-tab ? root.body : root.headers;
+            empty-text: !root.has-selection ? "Select a transaction to inspect it" : root.body-tab ? "Empty body" : "No headers available";
+        }
+    }
+}

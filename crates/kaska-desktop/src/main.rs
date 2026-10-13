@@ -86,6 +86,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let app = AppWindow::new()?;
+    app.global::<AppTheme>()
+        .set_mono_font(slint::SharedString::from(if cfg!(target_os = "windows") {
+            "Consolas"
+        } else {
+            "monospace"
+        }));
+    app.show()?;
+    platform::fit_initial_window(app.window());
     let controller = AppController::new(8080, 8989);
     controller.setup(&app);
 

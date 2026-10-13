@@ -1,188 +1,71 @@
+import { PageScrollView } from "../components/page_scroll_view.slint";
 import { AppTheme } from "../styles/theme.slint";
+import { ActionButton } from "../components/action_button.slint";
+import { DocumentView } from "../components/document_view.slint";
 
 export component RepeaterView inherits Rectangle {
-    background: transparent;
-
+    min-width: 0px;
+    min-height: 0px;
+    private property <bool> show-response;
+    private property <bool> compact: root.width < 800px;
+    PageScrollView {
+        label: "Read-only HTTP Repeater";
     VerticalLayout {
-        padding: 20px;
-        spacing: 16px;
-
-        // Info Banner
-        Rectangle {
-            background: #111a2e;
-            border-color: #1e3a8a;
-            border-width: 1px;
-            border-radius: 8px;
-            height: 70px;
-
-            VerticalLayout {
-                padding: 12px;
-                spacing: 4px;
-
-                HorizontalLayout {
-                    spacing: 8px;
-                    alignment: start;
-                    Text { text: "🔁"; font-size: 14px; vertical-alignment: center; }
-                    Text {
-                        text: "Native HTTP Repeater (Prepared Architecture)";
-                        color: #93c5fd;
-                        font-size: 13px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Text {
-                    text: "Enables manual manipulation, parameter crafting, and replaying of captured requests directly through the native Rust HTTP engine. Full interactive replay will be active in Milestone 1.";
-                    color: AppTheme.text-secondary;
-                    font-size: 11px;
-                    wrap: word-wrap;
-                }
-            }
+        padding: 12px;
+        spacing: 10px;
+        Text { text: "Read-only preview | Interactive replay is not connected yet"; color: AppTheme.text-primary; font-size: 13px; wrap: word-wrap; }
+        if root.compact: HorizontalLayout {
+            spacing: 6px;
+            ActionButton { text: "Request"; selected: !root.show-response; clicked => { root.show-response = false; } }
+            ActionButton { text: "Response"; selected: root.show-response; clicked => { root.show-response = true; } }
+            Rectangle { horizontal-stretch: 1; }
         }
-
-        // Repeater Workspace
         HorizontalLayout {
-            spacing: 14px;
-
-            // Request Crafting Side
-            Rectangle {
-                width: 50%;
+            spacing: 8px;
+            if !root.compact || !root.show-response: Rectangle {
+                horizontal-stretch: 1;
                 background: AppTheme.bg-card;
                 border-color: AppTheme.border-subtle;
                 border-width: 1px;
-                border-radius: 8px;
-
+                border-radius: 4px;
                 VerticalLayout {
-                    padding: 16px;
+                    padding: 12px;
                     spacing: 10px;
-
-                    Text {
-                        text: "Request Composer";
-                        color: AppTheme.text-primary;
-                        font-size: 13px;
-                        font-weight: 700;
-                    }
-
-                    // Target line
+                    Text { text: "Request example | Read only"; color: AppTheme.text-primary; font-size: 14px; font-weight: 600; }
+                    Text { text: "GET http://127.0.0.1:8989/api/status"; color: AppTheme.text-secondary; font-size: 13px; wrap: word-wrap; }
                     HorizontalLayout {
                         spacing: 8px;
-
-                        Rectangle {
-                            width: 80px;
-                            height: 34px;
-                            background: #1e293b;
-                            border-radius: 4px;
-                            Text {
-                                text: "GET";
-                                color: AppTheme.success;
-                                font-size: 12px;
-                                font-weight: 700;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        Rectangle {
-                            horizontal-stretch: 1;
-                            height: 34px;
-                            background: AppTheme.bg-input;
-                            border-color: AppTheme.border-subtle;
-                            border-width: 1px;
-                            border-radius: 4px;
-
-                            Text {
-                                text: "http://127.0.0.1:8989/api/status";
-                                color: AppTheme.text-secondary;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        // Disabled Send button
-                        Rectangle {
-                            width: 70px;
-                            height: 34px;
-                            background: #1e293b;
-                            border-radius: 4px;
-                            Text {
-                                text: "Send ➔";
-                                color: AppTheme.text-muted;
-                                font-size: 11px;
-                                font-weight: 600;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
+                        ActionButton { text: "Send"; icon: @image-url("../assets/icons/play.svg"); enabled: false; description: "This view is not connected to the native replay engine"; }
+                        Text { text: "Not available"; color: AppTheme.text-muted; font-size: 12px; vertical-alignment: center; }
+                        Rectangle { horizontal-stretch: 1; }
                     }
-
-                    Text {
-                        text: "Raw Request Headers & Body:";
-                        color: AppTheme.text-muted;
-                        font-size: 11px;
-                    }
-
-                    Rectangle {
-                        height: 280px;
-                        background: AppTheme.bg-input;
-                        border-radius: 4px;
-
-                        Text {
-                            text: "GET /api/status HTTP/1.1\nHost: 127.0.0.1:8989\nUser-Agent: Kaska-Repeater/0.1\nAccept: application/json\nConnection: close\n";
-                            color: AppTheme.text-secondary;
-                            font-size: 12px;
-                            font-family: "Consolas";
-                        }
+                    DocumentView {
+                        min-height: 160px;
+                        preferred-height: 260px;
+                        label: "Read-only request example";
+                        text: "GET /api/status HTTP/1.1\nHost: 127.0.0.1:8989\nUser-Agent: Kaska-Repeater/0.1\nAccept: application/json\nConnection: close\n";
                     }
                 }
             }
-
-            // Response Preview Side
-            Rectangle {
-                width: 50%;
+            if !root.compact || root.show-response: Rectangle {
+                horizontal-stretch: 1;
                 background: AppTheme.bg-card;
                 border-color: AppTheme.border-subtle;
                 border-width: 1px;
-                border-radius: 8px;
-
+                border-radius: 4px;
                 VerticalLayout {
-                    padding: 16px;
+                    padding: 12px;
                     spacing: 10px;
-
-                    Text {
-                        text: "Server Response";
-                        color: AppTheme.text-primary;
-                        font-size: 13px;
-                        font-weight: 700;
-                    }
-
-                    Rectangle {
-                        height: 322px;
-                        background: AppTheme.bg-input;
-                        border-radius: 4px;
-
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: 8px;
-                            Text {
-                                text: "Ready for Replay in Milestone 1";
-                                color: AppTheme.text-muted;
-                                font-size: 13px;
-                                font-weight: 600;
-                                horizontal-alignment: center;
-                            }
-                            Text {
-                                text: "Captured transactions from the Network Inspector can be dispatched to this Repeater engine.";
-                                color: #475569;
-                                font-size: 11px;
-                                horizontal-alignment: center;
-                                max-width: 320px;
-                                wrap: word-wrap;
-                            }
-                        }
+                    Text { text: "Response"; color: AppTheme.text-primary; font-size: 14px; font-weight: 600; }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 8px;
+                        Text { text: "No replay response"; color: AppTheme.text-primary; font-size: 16px; horizontal-alignment: center; }
+                        Text { text: "Sending from this view is not available yet."; color: AppTheme.text-muted; font-size: 13px; wrap: word-wrap; horizontal-alignment: center; }
                     }
                 }
             }
         }
+    }
     }
 }

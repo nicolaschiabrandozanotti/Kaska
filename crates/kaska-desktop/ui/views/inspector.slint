@@ -1,435 +1,227 @@
+import { ListView, ScrollView } from "std-widgets.slint";
 import { AppTheme } from "../styles/theme.slint";
+import { ActionButton } from "../components/action_button.slint";
+import { DocumentPanel, DocumentView } from "../components/document_view.slint";
 import { TrafficItem } from "../components/traffic_types.slint";
 
+component TrafficColumns inherits HorizontalLayout {
+    in property <TrafficItem> item;
+    in property <bool> heading: false;
+    padding-left: 10px;
+    padding-right: 10px;
+    spacing: 8px;
+    Text { text: root.heading ? "ID" : root.item.id; width: 44px; color: AppTheme.text-muted; font-size: 12px; vertical-alignment: center; }
+    Text { text: root.heading ? "Method" : root.item.method; width: 72px; color: root.heading ? AppTheme.text-muted : AppTheme.text-primary; font-size: 13px; vertical-alignment: center; }
+    Text { text: root.heading ? "Status" : root.item.status-code > 0 ? root.item.status-code : "Pending"; width: 64px; color: AppTheme.text-secondary; font-size: 13px; vertical-alignment: center; Tooltip { text: @markdown("\{root.item.status-text}"); } }
+    Text { text: root.heading ? "Host" : root.item.host; width: 170px; color: AppTheme.text-secondary; font-size: 13px; overflow: elide; vertical-alignment: center; Tooltip { text: @markdown("\{root.item.host}"); } }
+    Text { text: root.heading ? "Path" : root.item.path; min-width: 180px; horizontal-stretch: 1; color: AppTheme.text-primary; font-size: 13px; overflow: elide; vertical-alignment: center; Tooltip { text: @markdown("\{root.item.path}"); } }
+    Text { text: root.heading ? "Time" : root.item.duration-ms + " ms"; width: 80px; color: AppTheme.text-secondary; font-size: 13px; vertical-alignment: center; }
+    Text { text: root.heading ? "Size" : root.item.size-bytes + " B"; width: 80px; color: AppTheme.text-secondary; font-size: 13px; vertical-alignment: center; }
+    Text { text: root.heading ? "Type" : root.item.content-type; width: 160px; color: AppTheme.text-secondary; font-size: 13px; overflow: elide; vertical-alignment: center; Tooltip { text: @markdown("\{root.item.content-type}"); } }
+}
+
 export component NetworkInspectorView inherits Rectangle {
+    min-width: 0px;
+    min-height: 0px;
     in property <[TrafficItem]> items: [];
     in-out property <int> selected-index: -1;
-    in property <string> active-req-headers: "";
-    in property <string> active-req-body: "";
-    in property <string> active-resp-headers: "";
-    in property <string> active-resp-body: "";
-    in property <string> active-timing-text: "";
+    in property <string> active-req-headers;
+    in property <string> active-req-body;
+    in property <string> active-resp-headers;
+    in property <string> active-resp-body;
+    in property <string> active-timing-text;
+    in property <bool> proxy-running;
+    in property <string> proxy-addr;
+    in-out property <bool> request-body-tab;
+    in-out property <bool> response-body-tab;
+    in-out property <bool> show-response;
+    in-out property <bool> show-details;
+    in-out property <float> table-ratio: 0.4;
     callback select-item(int);
     callback clear-history();
+    private property <bool> compact: root.width < 800px;
+    private property <bool> short: workspace.height < 340px;
+    private property <length> table-width: max(1030px, table-scroll.visible-width);
 
-    background: transparent;
-
-    VerticalLayout {
-        padding: 16px;
-        spacing: 12px;
-
-        // Toolbar: Controls & Filters
-        Rectangle {
-            height: 42px;
-            background: AppTheme.bg-card;
-            border-color: AppTheme.border-subtle;
-            border-width: 1px;
-            border-radius: 6px;
-
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
-                alignment: space-between;
-
-                HorizontalLayout {
-                    spacing: 12px;
-                    alignment: center;
-
-                    Text {
-                        text: "HTTP Traffic History";
-                        color: AppTheme.text-primary;
-                        font-size: 13px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
-
-                    Rectangle {
-                        width: 1px;
-                        height: 16px;
-                        background: AppTheme.border-subtle;
-                    }
-
-                    Text {
-                        text: items.length > 0 ? (items.length + " transactions captured") : "Listening for requests...";
-                        color: AppTheme.text-muted;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                    }
-                }
-
-                HorizontalLayout {
-                    alignment: center;
-                    spacing: 10px;
-
-                    // Clear history button
-                    clear-btn := Rectangle {
-                        width: 70px;
-                        height: 28px;
-                        background: clear-touch.has-hover ? #374151 : transparent;
-                        border-color: AppTheme.border-subtle;
-                        border-width: 1px;
-                        border-radius: 4px;
-
-                        clear-touch := TouchArea {
-                            clicked => { root.clear-history(); }
-                        }
-
-                        Text {
-                            text: "Clear";
-                            color: AppTheme.text-secondary;
-                            font-size: 11px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
+    public function choose(index: int) {
+        if index >= 0 && index < root.items.length {
+            root.selected-index = index;
+            root.select-item(index);
+            let row-top = index * 32px;
+            if row-top + rows.content-y < 0px { rows.content-y = -row-top; }
+            else if row-top + 32px + rows.content-y > rows.visible-height {
+                rows.content-y = rows.visible-height - row-top - 32px;
             }
         }
-
-        // Top Half: Traffic Table
-        Rectangle {
-            height: 250px;
-            background: AppTheme.bg-card;
-            border-color: AppTheme.border-subtle;
-            border-width: 1px;
-            border-radius: 6px;
-
-            VerticalLayout {
-                // Table Header
-                Rectangle {
-                    height: 32px;
-                    background: #121520;
-                    border-color: AppTheme.border-subtle;
-                    border-width: 1px;
-
-                    HorizontalLayout {
-                        padding-left: 12px;
-                        padding-right: 12px;
-                        spacing: 8px;
-
-                        Text { text: "#"; width: 36px; color: AppTheme.text-muted; font-size: 11px; font-weight: 600; vertical-alignment: center; }
-                        Text { text: "Method"; width: 65px; color: AppTheme.text-muted; font-size: 11px; font-weight: 600; vertical-alignment: center; }
-                        Text { text: "Status"; width: 65px; color: AppTheme.text-muted; font-size: 11px; font-weight: 600; vertical-alignment: center; }
-                        Text { text: "Host"; width: 140px; color: AppTheme.text-muted; font-size: 11px; font-weight: 600; vertical-alignment: center; }
-                        Text { text: "Path"; horizontal-stretch: 1; color: AppTheme.text-muted; font-size: 11px; font-weight: 600; vertical-alignment: center; }
-                        Text { text: "Latency"; width: 70px; color: AppTheme.text-muted; font-size: 11px; font-weight: 600; vertical-alignment: center; }
-                        Text { text: "Size"; width: 65px; color: AppTheme.text-muted; font-size: 11px; font-weight: 600; vertical-alignment: center; }
-                        Text { text: "Content Type"; width: 140px; color: AppTheme.text-muted; font-size: 11px; font-weight: 600; vertical-alignment: center; }
+    }
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        HorizontalLayout {
+            height: 32px;
+            spacing: 8px;
+            Text { text: "HTTP traffic"; color: AppTheme.text-primary; font-size: 14px; font-weight: 600; vertical-alignment: center; }
+            Text { text: root.items.length + " requests"; color: AppTheme.text-muted; font-size: 12px; vertical-alignment: center; }
+            Rectangle { horizontal-stretch: 1; }
+            ActionButton { text: "Clear"; icon: @image-url("../assets/icons/trash-2.svg"); enabled: root.items.length > 0; description: "Clear captured traffic history"; clicked => { root.clear-history(); } }
+        }
+        workspace := Rectangle {
+            background: transparent;
+            if root.short: HorizontalLayout {
+                y: 0px;
+                height: 32px;
+                spacing: 6px;
+                ActionButton { text: "Traffic"; selected: !root.show-details; clicked => { root.show-details = false; } }
+                ActionButton { text: "Details"; selected: root.show-details; clicked => { root.show-details = true; } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            table := Rectangle {
+                y: root.short ? 40px : 0px;
+                height: root.short ? workspace.height - 40px : max(100px, min(workspace.height - 180px, workspace.height * root.table-ratio));
+                visible: !root.short || !root.show-details;
+                background: AppTheme.bg-card;
+                border-color: table-keys.has-focus ? AppTheme.border-focus : AppTheme.border-subtle;
+                border-width: table-keys.has-focus ? 2px : 1px;
+                border-radius: 4px;
+                forward-focus: table-keys;
+                accessible-role: list;
+                accessible-label: "HTTP traffic. Use arrow keys to select a transaction.";
+                accessible-item-count: root.items.length;
+                table-keys := FocusScope {
+                    key-pressed(event) => {
+                        if root.items.length == 0 { return reject; }
+                        if event.text == Key.DownArrow { root.choose(min(root.items.length - 1, root.selected-index + 1)); return accept; }
+                        if event.text == Key.UpArrow { root.choose(max(0, root.selected-index - 1)); return accept; }
+                        if event.text == Key.Home { root.choose(0); return accept; }
+                        if event.text == Key.End { root.choose(root.items.length - 1); return accept; }
+                        if event.text == Key.PageDown { root.choose(min(root.items.length - 1, root.selected-index + max(1, floor(rows.visible-height / 32px)))); return accept; }
+                        if event.text == Key.PageUp { root.choose(max(0, root.selected-index - max(1, floor(rows.visible-height / 32px)))); return accept; }
+                        return reject;
                     }
                 }
-
-                // Table Rows or Empty State
+                table-scroll := ScrollView {
+                    x: 2px; y: 2px;
+                    width: parent.width - 4px; height: parent.height - 4px;
+                    content-width: root.table-width;
+                    content-height: self.visible-height;
+                    vertical-scrollbar-policy: always-off;
+                    Rectangle {
+                        width: root.table-width;
+                        height: table-scroll.visible-height;
+                        VerticalLayout {
+                            spacing: 0px;
+                            Rectangle { height: 32px; background: AppTheme.bg-input; TrafficColumns { heading: true; } }
+                            rows := ListView {
+                                content-width: root.table-width;
+                                horizontal-scrollbar-policy: always-off;
+                                for item[index] in root.items: Rectangle {
+                                    height: 32px;
+                                    background: root.selected-index == index ? AppTheme.bg-row-selected : pointer.has-hover ? AppTheme.bg-row-hover : AppTheme.bg-card;
+                                    accessible-role: list-item;
+                                    accessible-label: item.method + " " + item.host + item.path + ", status " + item.status-code;
+                                    accessible-item-selected: root.selected-index == index;
+                                    accessible-item-selectable: true;
+                                    accessible-item-index: index;
+                                    accessible-action-default => { root.choose(index); }
+                                    pointer := TouchArea { clicked => { table-keys.focus(); root.choose(index); } }
+                                    if root.selected-index == index: Rectangle { x: 0px; y: 0px; width: 2px; background: AppTheme.text-primary; }
+                                    TrafficColumns { item: item; }
+                                }
+                            }
+                        }
+                    }
+                }
                 if root.items.length == 0: Rectangle {
-                    background: transparent;
+                    x: 8px; y: 34px;
+                    width: parent.width - 16px; height: max(0px, parent.height - 42px);
+                    background: AppTheme.bg-card;
                     VerticalLayout {
                         alignment: center;
                         spacing: 6px;
-                        Text {
-                            text: "No HTTP traffic captured yet";
-                            color: AppTheme.text-muted;
-                            font-size: 13px;
-                            horizontal-alignment: center;
-                        }
-                        Text {
-                            text: "Configure your browser or client to use proxy 127.0.0.1:8080, or click 'Test Local Capture' in the header.";
-                            color: #475569;
-                            font-size: 11px;
-                            horizontal-alignment: center;
-                        }
+                        Text { text: "No HTTP traffic captured"; font-size: 14px; color: AppTheme.text-primary; horizontal-alignment: center; }
+                        Text { text: root.proxy-running ? "Use proxy " + root.proxy-addr + " or test local capture." : "Capture is stopped. Start capture to inspect traffic."; font-size: 12px; color: AppTheme.text-muted; wrap: word-wrap; horizontal-alignment: center; }
                     }
                 }
-
-                if root.items.length > 0: Flickable {
-                    content-height: root.items.length * 32px;
-                    VerticalLayout {
-                        alignment: start;
-                        for item[idx] in root.items: Rectangle {
+            }
+            if !root.short: Rectangle {
+                y: table.height;
+                height: 10px;
+                forward-focus: split-keys;
+                accessible-role: slider;
+                accessible-label: "Traffic table height";
+                accessible-value: round(root.table-ratio * 100) + "%";
+                accessible-value-minimum: 20;
+                accessible-value-maximum: 65;
+                accessible-action-increment => { root.table-ratio = min(0.65, root.table-ratio + 0.05); }
+                accessible-action-decrement => { root.table-ratio = max(0.2, root.table-ratio - 0.05); }
+                background: split-touch.has-hover || split-keys.has-focus ? AppTheme.bg-row-selected : transparent;
+                Rectangle { x: (parent.width - 36px) / 2; y: 4px; width: 36px; height: 2px; background: AppTheme.text-muted; }
+                split-keys := FocusScope {
+                    key-pressed(event) => {
+                        if event.text == Key.DownArrow { root.table-ratio = min(0.65, root.table-ratio + 0.05); return accept; }
+                        if event.text == Key.UpArrow { root.table-ratio = max(0.2, root.table-ratio - 0.05); return accept; }
+                        return reject;
+                    }
+                }
+                split-touch := TouchArea {
+                    mouse-cursor: ns-resize;
+                    moved => { if self.pressed { root.table-ratio = max(0.2, min(0.65, (table.height + self.mouse-y) / workspace.height)); } }
+                }
+            }
+            details := Rectangle {
+                y: root.short ? 40px : table.height + 10px;
+                height: max(0px, workspace.height - self.y);
+                visible: !root.short || root.show-details;
+                background: transparent;
+                if root.short: VerticalLayout {
+                    spacing: 8px;
+                    HorizontalLayout {
                         height: 32px;
-                        background: root.selected-index == idx ? AppTheme.bg-row-selected :
-                                    row-touch.has-hover ? AppTheme.bg-row-hover :
-                                    (Math.mod(idx, 2) == 0 ? #171b29 : #1a1e2e);
-
-                        row-touch := TouchArea {
-                            clicked => {
-                                root.selected-index = idx;
-                                root.select-item(idx);
-                            }
-                        }
-
-                        HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 12px;
-                            spacing: 8px;
-
-                            Text {
-                                text: item.id;
-                                width: 36px;
-                                color: AppTheme.text-muted;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                            }
-
-                            // Method badge
-                            HorizontalLayout {
-                                width: 65px;
-                                alignment: start;
-                                Rectangle {
-                                    height: 20px;
-                                    border-radius: 3px;
-                                    background: item.method == "GET" ? #064e3b :
-                                                item.method == "POST" ? #1e3a8a :
-                                                item.method == "PUT" ? #78350f : #7f1d1d;
-                                    HorizontalLayout {
-                                        padding-left: 6px;
-                                        padding-right: 6px;
-                                        alignment: center;
-                                        Text {
-                                            text: item.method;
-                                            color: item.method == "GET" ? #a7f3d0 :
-                                                   item.method == "POST" ? #bfdbfe :
-                                                   item.method == "PUT" ? #fde68a : #fecaca;
-                                            font-size: 10px;
-                                            font-weight: 700;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Status Code
-                            Text {
-                                text: item.status-code > 0 ? (item.status-code + " " + item.status-text) : "Pending";
-                                width: 65px;
-                                color: item.status-code >= 200 && item.status-code < 300 ? AppTheme.success :
-                                       item.status-code >= 300 && item.status-code < 400 ? AppTheme.info :
-                                       item.status-code >= 400 && item.status-code < 500 ? AppTheme.warning :
-                                       item.status-code >= 500 ? AppTheme.danger : AppTheme.text-muted;
-                                font-size: 11px;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                            }
-
-                            Text {
-                                text: item.host;
-                                width: 140px;
-                                color: AppTheme.text-secondary;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
-
-                            Text {
-                                text: item.path;
-                                horizontal-stretch: 1;
-                                color: AppTheme.text-primary;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
-
-                            Text {
-                                text: item.duration-ms + " ms";
-                                width: 70px;
-                                color: AppTheme.text-muted;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                            }
-
-                            Text {
-                                text: item.size-bytes + " B";
-                                width: 65px;
-                                color: AppTheme.text-muted;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                            }
-
-                            Text {
-                                text: item.content-type;
-                                width: 140px;
-                                color: AppTheme.text-muted;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
-                        }
+                        spacing: 6px;
+                        ActionButton { text: "Request"; selected: !root.show-response; clicked => { root.show-response = false; } }
+                        ActionButton { text: "Response"; description: root.active-timing-text; selected: root.show-response; clicked => { root.show-response = true; } }
+                        ActionButton { text: "Headers"; selected: root.show-response ? !root.response-body-tab : !root.request-body-tab; clicked => { if root.show-response { root.response-body-tab = false; } else { root.request-body-tab = false; } } }
+                        ActionButton { text: "Body"; selected: root.show-response ? root.response-body-tab : root.request-body-tab; clicked => { if root.show-response { root.response-body-tab = true; } else { root.request-body-tab = true; } } }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                    DocumentView {
+                        label: root.show-response ? "Response detail" : "Request detail";
+                        text: root.selected-index < 0 || root.selected-index >= root.items.length ? "" : root.show-response ? (root.response-body-tab ? root.active-resp-body : root.active-resp-headers) : (root.request-body-tab ? root.active-req-body : root.active-req-headers);
+                        empty-text: root.selected-index < 0 || root.selected-index >= root.items.length ? "Select a transaction to inspect it" : "No content in this section";
                     }
                 }
-            }
-        }
-        }
-
-        // Bottom Half: Detailed Inspection (Request vs Response)
-        HorizontalLayout {
-            spacing: 12px;
-
-            // Request Inspector Panel
-            Rectangle {
-                width: 50%;
-                background: AppTheme.bg-card;
-                border-color: AppTheme.border-subtle;
-                border-width: 1px;
-                border-radius: 6px;
-
-                VerticalLayout {
-                    padding: 12px;
+                if !root.short: VerticalLayout {
                     spacing: 8px;
-
+                    if root.compact: HorizontalLayout {
+                        height: 32px;
+                        spacing: 6px;
+                        ActionButton { text: "Request"; selected: !root.show-response; clicked => { root.show-response = false; } }
+                        ActionButton { text: "Response"; selected: root.show-response; clicked => { root.show-response = true; } }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
                     HorizontalLayout {
-                        alignment: space-between;
-                        Text {
-                            text: "Request Inspection";
-                            color: AppTheme.text-primary;
-                            font-size: 12px;
-                            font-weight: 700;
+                        spacing: 8px;
+                        if !root.compact || !root.show-response: DocumentPanel {
+                            horizontal-stretch: 1;
+                            title: "Request";
+                            headers: root.active-req-headers;
+                            body: root.active-req-body;
+                            has-selection: root.selected-index >= 0 && root.selected-index < root.items.length;
+                            body-tab <=> root.request-body-tab;
                         }
-                        Text {
-                            text: "Raw Protocol";
-                            color: AppTheme.text-muted;
-                            font-size: 11px;
-                        }
-                    }
-
-                    Rectangle {
-                        height: 1px;
-                        background: AppTheme.border-subtle;
-                    }
-
-                    // Request Headers View
-                    Text {
-                        text: "Headers:";
-                        color: AppTheme.text-secondary;
-                        font-size: 11px;
-                        font-weight: 600;
-                    }
-
-                    Rectangle {
-                        height: 100px;
-                        background: AppTheme.bg-input;
-                        border-radius: 4px;
-
-                        Flickable {
-                            content-height: 200px;
-                            Text {
-                                text: root.active-req-headers != "" ? root.active-req-headers : "(Select a request to view headers)";
-                                color: AppTheme.text-secondary;
-                                font-size: 11px;
-                                font-family: "Consolas";
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
-
-                    // Request Body View
-                    Text {
-                        text: "Body Payload:";
-                        color: AppTheme.text-secondary;
-                        font-size: 11px;
-                        font-weight: 600;
-                    }
-
-                    Rectangle {
-                        height: 70px;
-                        background: AppTheme.bg-input;
-                        border-radius: 4px;
-
-                        Flickable {
-                            content-height: 120px;
-                            Text {
-                                text: root.active-req-body != "" ? root.active-req-body : "(Empty body)";
-                                color: AppTheme.text-secondary;
-                                font-size: 11px;
-                                font-family: "Consolas";
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Response Inspector Panel
-            Rectangle {
-                width: 50%;
-                background: AppTheme.bg-card;
-                border-color: AppTheme.border-subtle;
-                border-width: 1px;
-                border-radius: 6px;
-
-                VerticalLayout {
-                    padding: 12px;
-                    spacing: 8px;
-
-                    HorizontalLayout {
-                        alignment: space-between;
-                        Text {
-                            text: "Response Inspection";
-                            color: AppTheme.text-primary;
-                            font-size: 12px;
-                            font-weight: 700;
-                        }
-                        Text {
-                            text: root.active-timing-text != "" ? root.active-timing-text : "Awaiting selection";
-                            color: AppTheme.accent;
-                            font-size: 11px;
-                            font-weight: 600;
-                        }
-                    }
-
-                    Rectangle {
-                        height: 1px;
-                        background: AppTheme.border-subtle;
-                    }
-
-                    // Response Headers View
-                    Text {
-                        text: "Headers:";
-                        color: AppTheme.text-secondary;
-                        font-size: 11px;
-                        font-weight: 600;
-                    }
-
-                    Rectangle {
-                        height: 100px;
-                        background: AppTheme.bg-input;
-                        border-radius: 4px;
-
-                        Flickable {
-                            content-height: 200px;
-                            Text {
-                                text: root.active-resp-headers != "" ? root.active-resp-headers : "(Select a request to view headers)";
-                                color: AppTheme.text-secondary;
-                                font-size: 11px;
-                                font-family: "Consolas";
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
-
-                    // Response Body View
-                    Text {
-                        text: "Response Body:";
-                        color: AppTheme.text-secondary;
-                        font-size: 11px;
-                        font-weight: 600;
-                    }
-
-                    Rectangle {
-                        height: 70px;
-                        background: AppTheme.bg-input;
-                        border-radius: 4px;
-
-                        Flickable {
-                            content-height: 120px;
-                            Text {
-                                text: root.active-resp-body != "" ? root.active-resp-body : "(Empty body)";
-                                color: AppTheme.text-secondary;
-                                font-size: 11px;
-                                font-family: "Consolas";
-                                wrap: word-wrap;
-                            }
+                        if !root.compact || root.show-response: DocumentPanel {
+                            horizontal-stretch: 1;
+                            title: "Response";
+                            summary: root.active-timing-text;
+                            headers: root.active-resp-headers;
+                            body: root.active-resp-body;
+                            has-selection: root.selected-index >= 0 && root.selected-index < root.items.length;
+                            body-tab <=> root.response-body-tab;
                         }
                     }
                 }
             }
         }
+        if root.height > 300px: Text { text: "Text preview | Response inspection is limited to 2 MiB; binary data may appear as replacement characters."; font-size: 12px; color: AppTheme.text-muted; wrap: word-wrap; }
     }
 }
