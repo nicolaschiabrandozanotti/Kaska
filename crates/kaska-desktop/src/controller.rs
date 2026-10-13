@@ -6,6 +6,9 @@ use std::time::Duration;
 
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
+#[path = "repeater_adapter.rs"]
+pub mod repeater_adapter;
+
 use crate::platform::PlatformInfo;
 use crate::{AppWindow, TrafficItem};
 use kaska_http::models::HttpTransaction;
@@ -13,6 +16,10 @@ use kaska_http::proxy::NativeProxyServer;
 use kaska_http::scope::AuditScope;
 use kaska_http::store::{create_shared_store, SharedTrafficStore};
 use kaska_http::test_server::ControlledTestServer;
+use repeater_adapter::{
+    RepeaterAdapterError, RepeaterEventSink, RepeaterTaskController, RepeaterUiInput,
+    RepeaterViewState,
+};
 
 pub struct AppController {
     proxy_port: u16,
@@ -21,6 +28,7 @@ pub struct AppController {
     scope: Arc<AuditScope>,
     proxy: Arc<Mutex<Option<NativeProxyServer>>>,
     test_server: Arc<Mutex<Option<ControlledTestServer>>>,
+    repeater: Arc<RepeaterTaskController>,
 }
 
 impl Default for AppController {
@@ -31,14 +39,39 @@ impl Default for AppController {
 
 impl AppController {
     pub fn new(proxy_port: u16, test_server_port: u16) -> Self {
+        let scope = Arc::new(AuditScope::default());
+        let repeater = Arc::new(RepeaterTaskController::with_default_config(Arc::clone(
+            &scope,
+        )));
         Self {
             proxy_port,
             test_server_port,
             store: create_shared_store(),
-            scope: Arc::new(AuditScope::default()),
+            scope,
             proxy: Arc::new(Mutex::new(None)),
             test_server: Arc::new(Mutex::new(None)),
+            repeater,
         }
+    }
+
+    pub fn repeater(&self) -> &Arc<RepeaterTaskController> {
+        &self.repeater
+    }
+
+    pub fn dispatch_repeater(
+        &self,
+        input: RepeaterUiInput,
+        sink: Option<Arc<dyn RepeaterEventSink>>,
+    ) -> Result<u64, RepeaterAdapterError> {
+        self.repeater.dispatch(input, sink)
+    }
+
+    pub fn cancel_repeater(&self) -> Option<u64> {
+        self.repeater.cancel_active()
+    }
+
+    pub fn repeater_state_snapshot(&self) -> RepeaterViewState {
+        self.repeater.snapshot_state()
     }
 
     /// Sets up the controller, starts local servers and binds UI callbacks
@@ -294,5 +327,67 @@ impl AppController {
             }
             thread::sleep(Duration::from_millis(100));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::controller::repeater_adapter::{RepeaterEvent, RepeaterLifecycle};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
+    #[test]
+    fn test_app_controller_headless_repeater_dispatch_and_store_isolation() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).unwrap();
+            let resp =
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 13\r\nConnection: close\r\n\r\nController OK";
+            stream.write_all(resp).unwrap();
+        });
+
+        let app_controller = AppController::new(0, port);
+        assert_eq!(app_controller.store.lock().unwrap().count(), 0);
+        assert!(std::ptr::eq(
+            Arc::as_ptr(&app_controller.scope),
+            app_controller.repeater().scope() as *const AuditScope
+        ));
+
+        let (tx, rx) = mpsc::channel();
+        let input = RepeaterUiInput::new(
+            "GET",
+            format!("http://127.0.0.1:{}/controller-check", port),
+            format!("Host: 127.0.0.1:{}", port),
+            "",
+        );
+
+        let req_id = app_controller
+            .dispatch_repeater(input, Some(Arc::new(tx)))
+            .expect("Dispatch via AppController");
+        assert_eq!(req_id, 1);
+
+        let ev_started = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(ev_started, RepeaterEvent::Started { request_id: 1 });
+
+        let ev_completed = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(
+            ev_completed,
+            RepeaterEvent::Completed { request_id: 1, .. }
+        ));
+
+        let snap = app_controller.repeater_state_snapshot();
+        assert_eq!(snap.lifecycle, RepeaterLifecycle::Completed);
+        assert_eq!(snap.status_code, Some(200));
+        assert_eq!(snap.response_body_preview, "Controller OK");
+
+        // Ensure SharedTrafficStore remains completely untouched
+        assert_eq!(app_controller.store.lock().unwrap().count(), 0);
+
+        server.join().unwrap();
     }
 }
