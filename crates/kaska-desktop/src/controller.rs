@@ -17,9 +17,123 @@ use kaska_http::scope::AuditScope;
 use kaska_http::store::{create_shared_store, SharedTrafficStore};
 use kaska_http::test_server::ControlledTestServer;
 use repeater_adapter::{
-    RepeaterAdapterError, RepeaterEventSink, RepeaterTaskController, RepeaterUiInput,
-    RepeaterViewState,
+    RepeaterAdapterError, RepeaterEvent, RepeaterEventSink, RepeaterLifecycle,
+    RepeaterTaskController, RepeaterUiInput, RepeaterViewState,
 };
+
+/// Bridge struct implementing `RepeaterEventSink` for Slint's thread-safe event loop.
+///
+/// Holds a `slint::Weak<AppWindow>` to prevent cycles or keeping the UI window alive after close,
+/// and delegates state observation to the thread-safe `RepeaterTaskController` on the UI event loop.
+pub struct SlintRepeaterSink {
+    app: slint::Weak<AppWindow>,
+    repeater: Arc<RepeaterTaskController>,
+}
+
+impl RepeaterEventSink for SlintRepeaterSink {
+    fn on_event(&self, event: RepeaterEvent) {
+        let app_weak = self.app.clone();
+        let repeater = Arc::clone(&self.repeater);
+        let event_req_id = event.request_id();
+
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(app) = app_weak.upgrade() {
+                let snapshot = repeater.snapshot_state();
+                // Reject stale events if a newer or different request_id is active
+                if snapshot.active_request_id == event_req_id {
+                    apply_repeater_snapshot_to_ui(&app, &snapshot);
+                }
+            }
+        });
+    }
+}
+
+/// Applies a validated `RepeaterViewState` snapshot onto `AppWindow` properties.
+///
+/// Guarantees:
+/// - Executes strictly on the UI thread / event loop.
+/// - Never leaks raw secrets or echoes unvalidated inputs.
+/// - Translates lifecycle phase into appropriate UI flags and status summaries.
+pub fn apply_repeater_snapshot_to_ui(app: &AppWindow, snapshot: &RepeaterViewState) {
+    match snapshot.lifecycle {
+        RepeaterLifecycle::Idle => {
+            app.set_repeater_is_running(false);
+            app.set_repeater_is_cancelling(false);
+            app.set_repeater_status_text(SharedString::from("Idle"));
+            app.set_repeater_status_code(0);
+            app.set_repeater_duration_ms(0);
+            app.set_repeater_response_headers(SharedString::from(""));
+            app.set_repeater_response_body(SharedString::from(""));
+            app.set_repeater_received_bytes(0);
+            app.set_repeater_body_is_binary(false);
+            app.set_repeater_http_truncated(false);
+            app.set_repeater_preview_truncated(false);
+            app.set_repeater_error_message(SharedString::from(""));
+        }
+        RepeaterLifecycle::Running => {
+            app.set_repeater_is_running(true);
+            if !app.get_repeater_is_cancelling() {
+                app.set_repeater_status_text(SharedString::from("Running..."));
+            }
+            app.set_repeater_status_code(0);
+            app.set_repeater_duration_ms(0);
+            app.set_repeater_response_headers(SharedString::from(""));
+            app.set_repeater_response_body(SharedString::from(""));
+            app.set_repeater_received_bytes(0);
+            app.set_repeater_body_is_binary(false);
+            app.set_repeater_http_truncated(false);
+            app.set_repeater_preview_truncated(false);
+            app.set_repeater_error_message(SharedString::from(""));
+        }
+        RepeaterLifecycle::Completed => {
+            app.set_repeater_is_running(false);
+            app.set_repeater_is_cancelling(false);
+            let code = snapshot.status_code.unwrap_or(0);
+            app.set_repeater_status_code(code as i32);
+            app.set_repeater_status_text(SharedString::from(snapshot.status_text.clone()));
+            app.set_repeater_duration_ms(snapshot.duration_ms.unwrap_or(0) as i32);
+            app.set_repeater_response_headers(SharedString::from(
+                snapshot.response_headers.clone(),
+            ));
+            app.set_repeater_response_body(SharedString::from(
+                snapshot.response_body_preview.clone(),
+            ));
+            app.set_repeater_received_bytes(snapshot.received_body_bytes as i32);
+            app.set_repeater_body_is_binary(snapshot.body_is_binary);
+            app.set_repeater_http_truncated(snapshot.http_body_truncated);
+            app.set_repeater_preview_truncated(snapshot.preview_truncated);
+            app.set_repeater_error_message(SharedString::from(""));
+        }
+        RepeaterLifecycle::Failed => {
+            app.set_repeater_is_running(false);
+            app.set_repeater_is_cancelling(false);
+            app.set_repeater_status_code(0);
+            app.set_repeater_status_text(SharedString::from("Failed"));
+            app.set_repeater_duration_ms(0);
+            app.set_repeater_response_headers(SharedString::from(""));
+            app.set_repeater_response_body(SharedString::from(""));
+            app.set_repeater_received_bytes(0);
+            app.set_repeater_body_is_binary(false);
+            app.set_repeater_http_truncated(false);
+            app.set_repeater_preview_truncated(false);
+            app.set_repeater_error_message(SharedString::from(snapshot.error_message.clone()));
+        }
+        RepeaterLifecycle::Cancelled => {
+            app.set_repeater_is_running(false);
+            app.set_repeater_is_cancelling(false);
+            app.set_repeater_status_code(0);
+            app.set_repeater_status_text(SharedString::from("Cancelled"));
+            app.set_repeater_duration_ms(0);
+            app.set_repeater_response_headers(SharedString::from(""));
+            app.set_repeater_response_body(SharedString::from(""));
+            app.set_repeater_received_bytes(0);
+            app.set_repeater_body_is_binary(false);
+            app.set_repeater_http_truncated(false);
+            app.set_repeater_preview_truncated(false);
+            app.set_repeater_error_message(SharedString::from(snapshot.error_message.clone()));
+        }
+    }
+}
 
 pub struct AppController {
     proxy_port: u16,
@@ -82,6 +196,25 @@ impl AppController {
             "Native Proxy listening on 127.0.0.1:{}",
             self.proxy_port
         )));
+
+        // Initialize default Repeater view model on AppWindow
+        let default_repeater = RepeaterUiInput::default();
+        app.set_repeater_method(SharedString::from(default_repeater.method));
+        app.set_repeater_url(SharedString::from(default_repeater.target_url));
+        app.set_repeater_headers(SharedString::from(default_repeater.headers_raw));
+        app.set_repeater_body(SharedString::from(default_repeater.body_utf8));
+        app.set_repeater_is_running(false);
+        app.set_repeater_is_cancelling(false);
+        app.set_repeater_status_text(SharedString::from("Idle"));
+        app.set_repeater_status_code(0);
+        app.set_repeater_duration_ms(0);
+        app.set_repeater_response_headers(SharedString::from(""));
+        app.set_repeater_response_body(SharedString::from(""));
+        app.set_repeater_received_bytes(0);
+        app.set_repeater_body_is_binary(false);
+        app.set_repeater_http_truncated(false);
+        app.set_repeater_preview_truncated(false);
+        app.set_repeater_error_message(SharedString::from(""));
 
         // Start controlled test server
         let test_server = ControlledTestServer::new(self.test_server_port);
@@ -292,6 +425,81 @@ impl AppController {
                 ui.set_status_message(SharedString::from("History cleared"));
             }
         });
+
+        // 5. Repeater Bindings
+        let repeater_sink = Arc::new(SlintRepeaterSink {
+            app: app.as_weak(),
+            repeater: Arc::clone(&self.repeater),
+        });
+
+        // 5a. Send Repeater Callback
+        let app_weak_send = app.as_weak();
+        let repeater_send = Arc::clone(&self.repeater);
+        let sink_send = Arc::clone(&repeater_sink);
+
+        app.on_send_repeater(move || {
+            if let Some(ui) = app_weak_send.upgrade() {
+                let method = ui.get_repeater_method().to_string();
+                let url = ui.get_repeater_url().to_string();
+                let headers = ui.get_repeater_headers().to_string();
+                let body = ui.get_repeater_body().to_string();
+
+                let input = RepeaterUiInput::new(method, url, headers, body);
+                match repeater_send.dispatch(input, Some(sink_send.clone())) {
+                    Ok(_req_id) => {
+                        ui.set_repeater_is_running(true);
+                        ui.set_repeater_is_cancelling(false);
+                        ui.set_repeater_status_text(SharedString::from("Running..."));
+                        ui.set_repeater_error_message(SharedString::from(""));
+                        ui.set_repeater_status_code(0);
+                        ui.set_repeater_duration_ms(0);
+                        ui.set_repeater_response_headers(SharedString::from(""));
+                        ui.set_repeater_response_body(SharedString::from(""));
+                    }
+                    Err(err) => {
+                        if !matches!(err, RepeaterAdapterError::AlreadyRunning) {
+                            ui.set_repeater_is_running(false);
+                            ui.set_repeater_is_cancelling(false);
+                        }
+                        ui.set_repeater_status_text(SharedString::from("Failed"));
+                        ui.set_repeater_error_message(SharedString::from(
+                            err.safe_display_message(),
+                        ));
+                    }
+                }
+            }
+        });
+
+        // 5b. Cancel Repeater Callback
+        let app_weak_cancel = app.as_weak();
+        let repeater_cancel = Arc::clone(&self.repeater);
+
+        app.on_cancel_repeater(move || {
+            if repeater_cancel.is_in_flight() {
+                if let Some(ui) = app_weak_cancel.upgrade() {
+                    ui.set_repeater_is_cancelling(true);
+                    ui.set_repeater_status_text(SharedString::from("Cancelling..."));
+                }
+                let _ = repeater_cancel.cancel_active();
+            }
+        });
+
+        // 5c. Reset Repeater Defaults Callback
+        let app_weak_reset = app.as_weak();
+        let repeater_reset = Arc::clone(&self.repeater);
+
+        app.on_reset_repeater_defaults(move || {
+            if !repeater_reset.is_in_flight() {
+                if let Some(ui) = app_weak_reset.upgrade() {
+                    let default_input = RepeaterUiInput::default();
+                    ui.set_repeater_method(SharedString::from(default_input.method));
+                    ui.set_repeater_url(SharedString::from(default_input.target_url));
+                    ui.set_repeater_headers(SharedString::from(default_input.headers_raw));
+                    ui.set_repeater_body(SharedString::from(default_input.body_utf8));
+                    ui.set_repeater_error_message(SharedString::from(""));
+                }
+            }
+        });
     }
 
     /// Dispatches real HTTP requests over TCP to proxy
@@ -389,5 +597,232 @@ mod tests {
         assert_eq!(app_controller.store.lock().unwrap().count(), 0);
 
         server.join().unwrap();
+    }
+
+    #[test]
+    fn test_app_controller_real_loopback_post_and_store_isolation() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server_thread = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).unwrap();
+            let resp = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{\"echoed\": \"yes\"}";
+            let _ = stream.write_all(resp);
+        });
+
+        let app_controller = AppController::new(0, port);
+        let (tx, rx) = mpsc::channel();
+        let post_input = RepeaterUiInput::new(
+            "POST",
+            format!("http://127.0.0.1:{}/submit", port),
+            format!("Host: 127.0.0.1:{}\nContent-Type: application/json", port),
+            "{\"data\": 123}",
+        );
+
+        let req_id = app_controller
+            .dispatch_repeater(post_input, Some(Arc::new(tx)))
+            .expect("Dispatch POST");
+        assert_eq!(req_id, 1);
+
+        let ev_start = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(ev_start, RepeaterEvent::Started { request_id: 1 });
+
+        let ev_done = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        match ev_done {
+            RepeaterEvent::Completed { request_id, result } => {
+                assert_eq!(request_id, 1);
+                assert_eq!(result.response.status_code, 200);
+                assert_eq!(result.response.body, b"{\"echoed\": \"yes\"}");
+            }
+            other => panic!("Expected Completed event for POST, got {:?}", other),
+        }
+
+        let snap = app_controller.repeater_state_snapshot();
+        assert_eq!(snap.lifecycle, RepeaterLifecycle::Completed);
+        assert_eq!(snap.status_code, Some(200));
+        assert_eq!(snap.response_body_preview, "{\"echoed\": \"yes\"}");
+
+        // TrafficStore isolation
+        assert_eq!(app_controller.store.lock().unwrap().count(), 0);
+
+        server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn test_app_controller_cooperative_cancellation_and_store_isolation() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (release_server_tx, release_server_rx) = mpsc::channel();
+
+        let server_thread = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 512];
+            let _ = stream.read(&mut buf);
+            let _ = accepted_tx.send(());
+            let _ = release_server_rx.recv_timeout(Duration::from_secs(5));
+        });
+
+        let app_controller = AppController::new(0, port);
+        let (event_tx, event_rx) = mpsc::channel();
+        let input = RepeaterUiInput::new(
+            "GET",
+            format!("http://127.0.0.1:{}/slow", port),
+            format!("Host: 127.0.0.1:{}", port),
+            "",
+        );
+
+        let req_id = app_controller
+            .dispatch_repeater(input, Some(Arc::new(event_tx)))
+            .expect("Dispatch slow");
+        assert_eq!(req_id, 1);
+
+        let _ = event_rx.recv_timeout(Duration::from_secs(2)).unwrap(); // Started
+        accepted_rx.recv_timeout(Duration::from_secs(2)).unwrap(); // Server accepted
+
+        // Cancellation signal via AppController
+        let cancelled = app_controller.cancel_repeater();
+        assert_eq!(cancelled, Some(1));
+
+        let term_event = event_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(term_event, RepeaterEvent::Cancelled { request_id: 1 });
+
+        let snap = app_controller.repeater_state_snapshot();
+        assert_eq!(snap.lifecycle, RepeaterLifecycle::Cancelled);
+
+        let _ = release_server_tx.send(());
+        server_thread.join().unwrap();
+
+        // TrafficStore isolation
+        assert_eq!(app_controller.store.lock().unwrap().count(), 0);
+    }
+
+    #[test]
+    fn test_app_controller_validation_and_scope_rejections() {
+        let app_controller = AppController::new(0, 0);
+
+        // 1. Empty method rejection (synchronous)
+        let empty_method_input = RepeaterUiInput::new("", "http://127.0.0.1:8989/test", "", "");
+        let err1 = app_controller
+            .dispatch_repeater(empty_method_input, None)
+            .expect_err("Empty method must fail synchronously");
+        assert_eq!(err1, RepeaterAdapterError::EmptyMethod);
+        assert!(err1
+            .safe_display_message()
+            .contains("HTTP method cannot be empty"));
+
+        // 2. Unsupported method rejection (synchronous)
+        let unsupp_input = RepeaterUiInput::new("CONNECT", "http://127.0.0.1:8989/test", "", "");
+        let err2 = app_controller
+            .dispatch_repeater(unsupp_input, None)
+            .expect_err("CONNECT method must fail synchronously");
+        assert!(matches!(err2, RepeaterAdapterError::UnsupportedMethod(_)));
+
+        // 3. Empty target URL rejection (synchronous)
+        let empty_url_input = RepeaterUiInput::new("GET", "", "", "");
+        let err3 = app_controller
+            .dispatch_repeater(empty_url_input, None)
+            .expect_err("Empty URL must fail synchronously");
+        assert_eq!(err3, RepeaterAdapterError::EmptyTargetUrl);
+
+        // 4. Out of scope URL rejection (asynchronous via engine)
+        let (tx, rx) = mpsc::channel();
+        let out_of_scope_input = RepeaterUiInput::new(
+            "GET",
+            "http://external-target.com/api",
+            "Host: external-target.com",
+            "",
+        );
+        let req_id = app_controller
+            .dispatch_repeater(out_of_scope_input, Some(Arc::new(tx)))
+            .expect("Worker spawned for scope check");
+        assert_eq!(req_id, 4);
+        let _ = rx.recv_timeout(Duration::from_secs(2)).unwrap(); // Started
+        let term = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(
+            term,
+            RepeaterEvent::Failed {
+                request_id: 4,
+                error: RepeaterAdapterError::Engine(
+                    kaska_http::repeater::RepeaterError::HostOutOfScope(_)
+                )
+            }
+        ));
+
+        // TrafficStore isolation
+        assert_eq!(app_controller.store.lock().unwrap().count(), 0);
+    }
+
+    #[test]
+    fn test_app_controller_duplicate_dispatch_rejection() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 512];
+            let _ = stream.read(&mut buf);
+            let _ = accepted_tx.send(());
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        });
+
+        let app_controller = AppController::new(0, port);
+        let (tx, rx) = mpsc::channel();
+        let slow_input = RepeaterUiInput::new(
+            "GET",
+            format!("http://127.0.0.1:{}/slow", port),
+            format!("Host: 127.0.0.1:{}", port),
+            "",
+        );
+
+        let req_id = app_controller
+            .dispatch_repeater(slow_input.clone(), Some(Arc::new(tx)))
+            .expect("First dispatch");
+        assert_eq!(req_id, 1);
+        let _ = rx.recv_timeout(Duration::from_secs(2)).unwrap(); // Started
+        accepted_rx.recv_timeout(Duration::from_secs(2)).unwrap(); // Server accepted
+
+        // Second dispatch while first is running must fail with AlreadyRunning
+        let duplicate_err = app_controller
+            .dispatch_repeater(slow_input, None)
+            .expect_err("Duplicate dispatch must fail");
+        assert_eq!(duplicate_err, RepeaterAdapterError::AlreadyRunning);
+
+        let _ = app_controller.cancel_repeater();
+        let _ = release_tx.send(());
+        server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn test_app_controller_initial_and_reset_defaults_projection() {
+        let app_controller = AppController::new(8080, 8989);
+        let default_input = RepeaterUiInput::default();
+
+        // 1. Verify contract defaults
+        assert_eq!(default_input.method, "GET");
+        assert_eq!(default_input.target_url, "http://127.0.0.1:8989/api/status");
+        assert_eq!(
+            default_input.headers_raw,
+            "Host: 127.0.0.1:8989\nUser-Agent: Kaska-Repeater/0.1\nAccept: application/json"
+        );
+        assert!(default_input.body_utf8.is_empty());
+
+        // 2. Strict distinction: target port is 8989 (test server), NOT 8080 (proxy)
+        assert!(default_input.target_url.contains(":8989"));
+        assert!(!default_input.target_url.contains(":8080"));
+        assert!(default_input.headers_raw.contains("Host: 127.0.0.1:8989"));
+        assert!(!default_input.headers_raw.contains("Host: 127.0.0.1:8080"));
+
+        // 3. Initial state snapshot check
+        let initial_snap = app_controller.repeater_state_snapshot();
+        assert_eq!(initial_snap.lifecycle, RepeaterLifecycle::Idle);
+        assert_eq!(initial_snap.active_request_id, 0);
+        assert_eq!(initial_snap.status_code, None);
+        assert!(initial_snap.error_message.is_empty());
     }
 }

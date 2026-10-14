@@ -1,7 +1,7 @@
 //! Native snapshots/input checks, followed by a real controller smoke test on ephemeral loopback ports.
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     fs,
     io::{BufWriter, Write},
     path::PathBuf,
@@ -115,8 +115,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop((proxy_reservation, server_reservation));
     let live_controller = Rc::new(controller::AppController::new(proxy_port, server_port));
     let live_wait = Rc::new(Cell::new(0));
+
+    let cancel_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let cancel_server_port = cancel_listener.local_addr()?.port();
+    let (cancel_req_tx, cancel_req_rx) = std::sync::mpsc::channel();
+    let (cancel_rel_tx, cancel_rel_rx) = std::sync::mpsc::channel();
+    let cancel_server_handle = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = cancel_listener.accept() {
+            let mut buf = [0u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _ = cancel_req_tx.send(());
+            let _ = cancel_rel_rx.recv_timeout(Duration::from_secs(5));
+        }
+    });
+    let cancel_server = Rc::new(RefCell::new(Some((
+        cancel_req_rx,
+        cancel_rel_tx,
+        cancel_server_handle,
+    ))));
+
     let weak = app.as_weak();
     let step = Rc::new(Cell::new(0usize));
+    let cancel_server_cell = cancel_server.clone();
+    let cancel_port = cancel_server_port;
+    let cancel_wait = Rc::new(Cell::new(0usize));
+    let cancel_wait_cell = cancel_wait.clone();
     let timer = slint::Timer::default();
     timer.start(
         slint::TimerMode::Repeated,
@@ -254,6 +277,141 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 assert!(!app.get_proxy_running());
                 assert!(std::net::TcpStream::connect(("127.0.0.1", proxy_port)).is_err(), "Stopped proxy releases its listener");
                 println!("PASS: real clear history and stop capture callbacks, proxy listener released");
+                step.set(tick + 1);
+                return;
+            } else if index == sizes.len() * 4 + 5 {
+                // 1. Repeater Idle state
+                if tick.is_multiple_of(2) {
+                    app.set_active_tab(1);
+                    resize(app.window(), 1180.0, 680.0);
+                    step.set(tick + 1);
+                    return;
+                }
+                assert_eq!(app.get_repeater_method(), "GET");
+                assert_eq!(app.get_repeater_status_text(), "Idle");
+                assert_eq!(app.get_repeater_url(), "http://127.0.0.1:8989/api/status");
+                assert_eq!(
+                    app.get_repeater_headers(),
+                    "Host: 127.0.0.1:8989\nUser-Agent: Kaska-Repeater/0.1\nAccept: application/json"
+                );
+                // Verify Reset Defaults restores port 8989 and default headers
+                app.set_repeater_method("POST".into());
+                app.set_repeater_url("http://127.0.0.1:9999/custom".into());
+                app.invoke_reset_repeater_defaults();
+                assert_eq!(app.get_repeater_method(), "GET");
+                assert_eq!(app.get_repeater_url(), "http://127.0.0.1:8989/api/status");
+                assert_eq!(
+                    app.get_repeater_headers(),
+                    "Host: 127.0.0.1:8989\nUser-Agent: Kaska-Repeater/0.1\nAccept: application/json"
+                );
+                save_snapshot(app.window(), &output.join("repeater-idle.ppm"));
+                println!("PASS: Repeater Idle state snapshot");
+            } else if index == sizes.len() * 4 + 6 {
+                // 2. Repeater Real Execution & Running state
+                if tick.is_multiple_of(2) {
+                    app.set_repeater_url(format!("http://127.0.0.1:{}/api/status", server_port).into());
+                    app.set_repeater_headers(format!("Host: 127.0.0.1:{}\nAccept: application/json", server_port).into());
+                    app.invoke_send_repeater();
+                    assert!(app.get_repeater_is_running());
+                    save_snapshot(app.window(), &output.join("repeater-running.ppm"));
+                    println!("PASS: Repeater Running state snapshot");
+                    step.set(tick + 1);
+                    return;
+                }
+                if live_controller.repeater().is_in_flight() {
+                    return;
+                }
+                assert_eq!(app.get_repeater_status_code(), 200);
+                assert_eq!(app.get_repeater_status_text(), "OK");
+                assert!(!app.get_repeater_response_headers().is_empty());
+                assert!(!app.get_repeater_response_body().is_empty());
+                assert_eq!(
+                    live_controller.repeater_state_snapshot().lifecycle,
+                    controller::repeater_adapter::RepeaterLifecycle::Completed,
+                    "Snapshot lifecycle must be Completed"
+                );
+                save_snapshot(app.window(), &output.join("repeater-completed.ppm"));
+                println!("PASS: Repeater Completed real HTTP loopback snapshot; port={server_port}");
+            } else if index == sizes.len() * 4 + 7 {
+                // 3. Repeater Cancelling & Cancelled states
+                if tick.is_multiple_of(2) {
+                    app.set_repeater_url(format!("http://127.0.0.1:{cancel_port}/slow").into());
+                    app.set_repeater_headers(format!("Host: 127.0.0.1:{cancel_port}").into());
+                    app.invoke_send_repeater();
+                    {
+                        let guard = cancel_server_cell.borrow();
+                        let (req_rx, _, _) = guard.as_ref().expect("Cancel test server active");
+                        req_rx
+                            .recv_timeout(Duration::from_secs(2))
+                            .expect("Pending request must arrive at cancel test server");
+                    }
+                    assert!(
+                        live_controller.repeater().is_in_flight(),
+                        "Must be in-flight before cancellation"
+                    );
+                    app.invoke_cancel_repeater();
+                    assert!(app.get_repeater_is_cancelling(), "Must be in cancelling state");
+                    assert!(app.get_repeater_is_running(), "Must still be running while cancelling");
+                    assert_eq!(app.get_repeater_status_text(), "Cancelling...");
+                    save_snapshot(app.window(), &output.join("repeater-cancelling.ppm"));
+                    println!("PASS: Repeater Cancelling state snapshot");
+                    // R3: DO NOT release the pending connection yet! Keep the socket held open
+                    // by the server while the worker cooperatively detects the cancellation token.
+                    step.set(tick + 1);
+                    return;
+                }
+                if live_controller.repeater().is_in_flight()
+                    || app.get_repeater_status_text() != "Cancelled"
+                {
+                    cancel_wait_cell.set(cancel_wait_cell.get() + 1);
+                    assert!(
+                        cancel_wait_cell.get() < 16,
+                        "Timed out waiting for repeater cancellation while server holds connection"
+                    );
+                    return;
+                }
+                let snapshot = live_controller.repeater_state_snapshot();
+                assert_eq!(
+                    snapshot.lifecycle,
+                    controller::repeater_adapter::RepeaterLifecycle::Cancelled,
+                    "Snapshot lifecycle must be Cancelled"
+                );
+                assert_eq!(app.get_repeater_status_text(), "Cancelled");
+                assert!(!app.get_repeater_is_running(), "is-running must be false after cancel");
+                assert!(!app.get_repeater_is_cancelling(), "is-cancelling must be false after cancel");
+                assert_eq!(app.get_repeater_status_code(), 0);
+                assert_eq!(app.get_repeater_response_headers(), "");
+                assert_eq!(app.get_repeater_response_body(), "");
+                assert!(!app.get_repeater_error_message().is_empty());
+                save_snapshot(app.window(), &output.join("repeater-cancelled.ppm"));
+                println!("PASS: Repeater Cancelled state snapshot");
+                // R3: ONLY release the slow server socket after confirming terminal Cancelled state
+                if let Some((_, rel_tx, handle)) = cancel_server_cell.borrow_mut().take() {
+                    let _ = rel_tx.send(());
+                    let _ = handle.join();
+                }
+            } else if index == sizes.len() * 4 + 8 {
+                // 4. Repeater Failed state (Out of Scope URL rejection)
+                if tick.is_multiple_of(2) {
+                    app.set_repeater_url("http://192.168.1.100:8080/forbidden".into());
+                    app.set_repeater_headers("Host: 192.168.1.100".into());
+                    app.invoke_send_repeater();
+                    step.set(tick + 1);
+                    return;
+                }
+                if live_controller.repeater().is_in_flight() {
+                    return;
+                }
+                assert_eq!(app.get_repeater_status_text(), "Failed");
+                assert!(!app.get_repeater_error_message().is_empty());
+                assert_eq!(
+                    live_controller.repeater_state_snapshot().lifecycle,
+                    controller::repeater_adapter::RepeaterLifecycle::Failed,
+                    "Snapshot lifecycle must be Failed"
+                );
+                save_snapshot(app.window(), &output.join("repeater-failed.ppm"));
+                println!("PASS: Repeater Failed out-of-scope snapshot");
+                println!("PASS: All Repeater native snapshots and state verifications completed successfully");
                 slint::quit_event_loop().unwrap();
             } else {
                 let long_document = index == sizes.len() * 4;
@@ -298,6 +456,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             step.set(tick + 1);
         },
     );
-    app.run()?;
+    let run_res = app.run();
+    if let Some((_, rel_tx, handle)) = cancel_server.borrow_mut().take() {
+        let _ = rel_tx.send(());
+        let _ = handle.join();
+    }
+    run_res?;
     Ok(())
 }

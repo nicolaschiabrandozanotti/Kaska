@@ -56,11 +56,32 @@ export component AppWindow inherits Window {
     in property <string> os-info: "Windows x86_64";
     in property <int> transactions-count: 0;
 
+    // Repeater state & inputs
+    in-out property <string> repeater-method: "GET";
+    in-out property <string> repeater-url: "http://127.0.0.1:8989/api/status";
+    in-out property <string> repeater-headers: "Host: 127.0.0.1:8989\nUser-Agent: Kaska-Repeater/0.1\nAccept: application/json";
+    in-out property <string> repeater-body: "";
+    in-out property <bool> repeater-is-running: false;
+    in-out property <bool> repeater-is-cancelling: false;
+    in-out property <string> repeater-status-text: "Idle";
+    in-out property <int> repeater-status-code: 0;
+    in-out property <int> repeater-duration-ms: 0;
+    in-out property <string> repeater-response-headers: "";
+    in-out property <string> repeater-response-body: "";
+    in-out property <int> repeater-received-bytes: 0;
+    in-out property <bool> repeater-body-is-binary: false;
+    in-out property <bool> repeater-http-truncated: false;
+    in-out property <bool> repeater-preview-truncated: false;
+    in-out property <string> repeater-error-message: "";
+
     // Callbacks to Rust backend
     callback toggle-proxy();
     callback send-test-traffic();
     callback select-transaction(int);
     callback clear-history();
+    callback send-repeater();
+    callback cancel-repeater();
+    callback reset-repeater-defaults();
 
     // Do not let the anchored shell impose its current size as a window minimum.
     Rectangle {
@@ -125,7 +146,27 @@ export component AppWindow inherits Window {
                         clear-history => { root.clear-history(); }
                     }
 
-                    if root.active-tab == 1: RepeaterView {}
+                    if root.active-tab == 1: RepeaterView {
+                        method <=> root.repeater-method;
+                        url <=> root.repeater-url;
+                        headers <=> root.repeater-headers;
+                        body <=> root.repeater-body;
+                        is-running: root.repeater-is-running;
+                        is-cancelling: root.repeater-is-cancelling;
+                        status-text: root.repeater-status-text;
+                        status-code: root.repeater-status-code;
+                        duration-ms: root.repeater-duration-ms;
+                        response-headers: root.repeater-response-headers;
+                        response-body: root.repeater-response-body;
+                        received-bytes: root.repeater-received-bytes;
+                        body-is-binary: root.repeater-body-is-binary;
+                        http-truncated: root.repeater-http-truncated;
+                        preview-truncated: root.repeater-preview-truncated;
+                        error-message: root.repeater-error-message;
+                        send-request => { root.send-repeater(); }
+                        cancel-request => { root.cancel-repeater(); }
+                        reset-defaults => { root.reset-repeater-defaults(); }
+                    }
 
                     if root.active-tab == 2: ScopeView {}
 
