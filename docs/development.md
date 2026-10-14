@@ -24,9 +24,9 @@ Esta guía proporciona las instrucciones necesarias para clonar, compilar, ejecu
 > [!NOTE]
 > **Estado de verificación de plataformas y CI:**
 > - **Tests locales Windows:** Verificados al 100% en host Windows x86_64.
-> - **CI Windows / Linux (GitHub Actions):** Flujo definido en `.github/workflows/ci.yml`, pendiente de primera ejecución remota real en runners.
-> - **Validación Semántica `actionlint`:** GitHub Actions no ejecuta `actionlint` por defecto; el gate semántico de `actionlint` permanece **PENDING** hasta que se ejecute explícitamente en un entorno que disponga de la herramienta.
-> - **Soporte visual Slint en Linux:** Pendiente de comprobación funcional interactiva sobre sesión de escritorio Linux real.
+> - **CI Windows / Linux (GitHub Actions):** Flujo automatizado en `.github/workflows/ci.yml` ejecutado en cada `push` y `pull_request` a las ramas `main` y `develop` sobre runners `windows-latest` y `ubuntu-latest`. La ejecución postmerge del Hito 1.2 (Run `38510967689`) certificó 63/63 tests pasando en cada plataforma en dicha corrida, `cargo fmt --check`, `cargo clippy -- -D warnings`, builds dev/release, smoke test headless (`--headless-test`) y verificación estricta de sockets libres.
+> - **Validación Semántica `actionlint`:** Automatizada en el pipeline de Ubuntu mediante descarga de `actionlint` v1.7.12 con verificación estricta de suma SHA-256 (`8aca8db...`), validando los archivos `.github/workflows/*.yml`.
+> - **Soporte visual Slint en Linux:** Pendiente de comprobación funcional interactiva sobre sesión de escritorio Linux real (X11 / Wayland con display activo).
 > - **Comportamiento de `--locked`:** El flag `--locked` no deshabilita el acceso a la red por sí mismo (a diferencia de `--offline`), sino que exige que Cargo respete estrictamente el archivo `Cargo.lock` sin actualizar ni recalcular versiones de dependencias.
 
 ---
