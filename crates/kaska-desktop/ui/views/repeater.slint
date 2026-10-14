@@ -2,70 +2,446 @@ import { PageScrollView } from "../components/page_scroll_view.slint";
 import { AppTheme } from "../styles/theme.slint";
 import { ActionButton } from "../components/action_button.slint";
 import { DocumentView } from "../components/document_view.slint";
+import { ScrollView } from "std-widgets.slint";
 
-export component RepeaterView inherits Rectangle {
-    min-width: 0px;
-    min-height: 0px;
-    private property <bool> show-response;
-    private property <bool> compact: root.width < 800px;
-    PageScrollView {
-        label: "Read-only HTTP Repeater";
-    VerticalLayout {
-        padding: 12px;
-        spacing: 10px;
-        Text { text: "Read-only preview | Interactive replay is not connected yet"; color: AppTheme.text-primary; font-size: 13px; wrap: word-wrap; }
-        if root.compact: HorizontalLayout {
-            spacing: 6px;
-            ActionButton { text: "Request"; selected: !root.show-response; clicked => { root.show-response = false; } }
-            ActionButton { text: "Response"; selected: root.show-response; clicked => { root.show-response = true; } }
-            Rectangle { horizontal-stretch: 1; }
-        }
-        HorizontalLayout {
-            spacing: 8px;
-            if !root.compact || !root.show-response: Rectangle {
-                horizontal-stretch: 1;
-                background: AppTheme.bg-card;
-                border-color: AppTheme.border-subtle;
-                border-width: 1px;
-                border-radius: 4px;
-                VerticalLayout {
-                    padding: 12px;
-                    spacing: 10px;
-                    Text { text: "Request example | Read only"; color: AppTheme.text-primary; font-size: 14px; font-weight: 600; }
-                    Text { text: "GET http://127.0.0.1:8989/api/status"; color: AppTheme.text-secondary; font-size: 13px; wrap: word-wrap; }
-                    HorizontalLayout {
-                        spacing: 8px;
-                        ActionButton { text: "Send"; icon: @image-url("../assets/icons/play.svg"); enabled: false; description: "This view is not connected to the native replay engine"; }
-                        Text { text: "Not available"; color: AppTheme.text-muted; font-size: 12px; vertical-alignment: center; }
-                        Rectangle { horizontal-stretch: 1; }
-                    }
-                    DocumentView {
-                        min-height: 160px;
-                        preferred-height: 260px;
-                        label: "Read-only request example";
-                        text: "GET /api/status HTTP/1.1\nHost: 127.0.0.1:8989\nUser-Agent: Kaska-Repeater/0.1\nAccept: application/json\nConnection: close\n";
-                    }
+component RepeaterEditorView inherits Rectangle {
+    in-out property <string> text;
+    in property <string> label;
+    in property <string> placeholder: "";
+    forward-focus: editor;
+    background: AppTheme.bg-input;
+    border-color: editor.has-focus ? AppTheme.border-focus : AppTheme.border-subtle;
+    border-width: editor.has-focus ? 2px : 1px;
+    border-radius: 4px;
+    scroll := ScrollView {
+        x: 8px;
+        y: 8px;
+        width: parent.width - 16px;
+        height: parent.height - 16px;
+        content-width: max(self.visible-width, editor.preferred-width);
+        content-height: max(self.visible-height, editor.preferred-height);
+        editor := TextInput {
+            text <=> root.text;
+            read-only: false;
+            single-line: false;
+            wrap: no-wrap;
+            width: scroll.content-width;
+            height: scroll.content-height;
+            font-family: AppTheme.mono-font;
+            font-size: 13px;
+            color: AppTheme.text-primary;
+            selection-background-color: AppTheme.bg-row-selected;
+            selection-foreground-color: AppTheme.text-primary;
+            page-height: scroll.visible-height;
+            accessible-label: root.label;
+            accessible-read-only: false;
+            cursor-position-changed(pos) => {
+                if pos.y + scroll.content-y < 0px {
+                    scroll.content-y = min(0px, -pos.y);
+                } else if pos.y + scroll.content-y > scroll.visible-height - 20px {
+                    scroll.content-y = min(0px, scroll.visible-height - pos.y - 20px);
                 }
-            }
-            if !root.compact || root.show-response: Rectangle {
-                horizontal-stretch: 1;
-                background: AppTheme.bg-card;
-                border-color: AppTheme.border-subtle;
-                border-width: 1px;
-                border-radius: 4px;
-                VerticalLayout {
-                    padding: 12px;
-                    spacing: 10px;
-                    Text { text: "Response"; color: AppTheme.text-primary; font-size: 14px; font-weight: 600; }
-                    VerticalLayout {
-                        alignment: center;
-                        spacing: 8px;
-                        Text { text: "No replay response"; color: AppTheme.text-primary; font-size: 16px; horizontal-alignment: center; }
-                        Text { text: "Sending from this view is not available yet."; color: AppTheme.text-muted; font-size: 13px; wrap: word-wrap; horizontal-alignment: center; }
-                    }
+                if pos.x + scroll.content-x < 0px {
+                    scroll.content-x = min(0px, -pos.x);
+                } else if pos.x + scroll.content-x > scroll.visible-width {
+                    scroll.content-x = min(0px, scroll.visible-width - pos.x);
                 }
             }
         }
     }
+    if root.text == "" && !editor.has-focus: Text {
+        x: 8px;
+        y: 8px;
+        text: root.placeholder;
+        color: AppTheme.text-muted;
+        font-family: AppTheme.mono-font;
+        font-size: 13px;
+    }
+}
+
+export component RepeaterView inherits Rectangle {
+    min-width: 0px;
+    min-height: 0px;
+
+    // Editable input properties
+    in-out property <string> method: "GET";
+    in-out property <string> url: "http://127.0.0.1:8989/api/status";
+    in-out property <string> headers: "Host: 127.0.0.1:8989\nUser-Agent: Kaska-Repeater/0.1\nAccept: application/json";
+    in-out property <string> body: "";
+
+    // Execution state and outputs
+    in property <bool> is-running: false;
+    in property <bool> is-cancelling: false;
+    in property <string> status-text: "Idle";
+    in property <int> status-code: 0;
+    in property <int> duration-ms: 0;
+    in property <string> response-headers: "";
+    in property <string> response-body: "";
+    in property <int> received-bytes: 0;
+    in property <bool> body-is-binary: false;
+    in property <bool> http-truncated: false;
+    in property <bool> preview-truncated: false;
+    in property <string> error-message: "";
+
+    // Callbacks to Rust coordinator
+    callback send-request();
+    callback cancel-request();
+    callback reset-defaults();
+
+    // Internal navigation & layout properties
+    private property <bool> show-response: false;
+    private property <bool> compact: root.width < 800px;
+    private property <bool> request-body-tab: false;
+    private property <bool> response-body-tab: false;
+    private property <bool> has-response: root.status-code > 0 || root.response-headers != "" || root.response-body != "";
+    private property <string> status-summary: root.is-cancelling ? "Cancelling..." :
+        root.is-running ? "Running..." :
+        root.status-text == "Cancelled" ? "Cancelled" :
+        (root.status-text == "Failed" || root.error-message != "") ? "Failed" :
+        root.status-code > 0 ? ("Status " + root.status-code + " (" + root.status-text + ") • " + root.duration-ms + " ms") :
+        "Idle";
+
+    PageScrollView {
+        label: "HTTP Repeater";
+        VerticalLayout {
+            padding: 12px;
+            spacing: 10px;
+
+            Text {
+                text: "HTTP Repeater | Loopback Request Composer & Native Replay Engine";
+                color: AppTheme.text-primary;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+
+            if root.compact: HorizontalLayout {
+                spacing: 6px;
+                ActionButton {
+                    text: "Request";
+                    selected: !root.show-response;
+                    clicked => { root.show-response = false; }
+                }
+                ActionButton {
+                    text: "Response";
+                    selected: root.show-response;
+                    clicked => { root.show-response = true; }
+                }
+                Rectangle { horizontal-stretch: 1; }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                // --- Request Card ---
+                if !root.compact || !root.show-response: Rectangle {
+                    horizontal-stretch: 1;
+                    background: AppTheme.bg-card;
+                    border-color: AppTheme.border-subtle;
+                    border-width: 1px;
+                    border-radius: 4px;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 10px;
+
+                        HorizontalLayout {
+                            Text {
+                                text: "Request";
+                                color: AppTheme.text-primary;
+                                font-size: 14px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            Text {
+                                text: "HTTP/1.1 Loopback Scope";
+                                color: AppTheme.text-secondary;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // Method & Target URL row
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle {
+                                width: 80px;
+                                height: 32px;
+                                background: AppTheme.bg-input;
+                                border-color: method-input.has-focus ? AppTheme.border-focus : AppTheme.border-subtle;
+                                border-width: method-input.has-focus ? 2px : 1px;
+                                border-radius: 4px;
+                                method-input := TextInput {
+                                    x: 6px;
+                                    width: parent.width - 12px;
+                                    y: (parent.height - self.height) / 2;
+                                    text <=> root.method;
+                                    single-line: true;
+                                    font-family: AppTheme.mono-font;
+                                    font-size: 13px;
+                                    color: AppTheme.text-primary;
+                                    accessible-label: "HTTP Method";
+                                }
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 32px;
+                                background: AppTheme.bg-input;
+                                border-color: url-input.has-focus ? AppTheme.border-focus : AppTheme.border-subtle;
+                                border-width: url-input.has-focus ? 2px : 1px;
+                                border-radius: 4px;
+                                url-input := TextInput {
+                                    x: 8px;
+                                    width: parent.width - 16px;
+                                    y: (parent.height - self.height) / 2;
+                                    text <=> root.url;
+                                    single-line: true;
+                                    font-family: AppTheme.mono-font;
+                                    font-size: 13px;
+                                    color: AppTheme.text-primary;
+                                    accessible-label: "Target URL";
+                                }
+                            }
+                        }
+
+                        // Actions & Method Shortcuts
+                        HorizontalLayout {
+                            spacing: 6px;
+                            ActionButton {
+                                text: "Send";
+                                icon: @image-url("../assets/icons/play.svg");
+                                enabled: !root.is-running;
+                                description: "Send HTTP request to loopback target";
+                                clicked => { root.send-request(); }
+                            }
+                            ActionButton {
+                                text: root.is-cancelling ? "Cancelling..." : "Cancel";
+                                icon: @image-url("../assets/icons/square.svg");
+                                enabled: root.is-running && !root.is-cancelling;
+                                description: "Cancel in-flight request";
+                                clicked => { root.cancel-request(); }
+                            }
+                            ActionButton {
+                                text: "Reset Defaults";
+                                icon: @image-url("../assets/icons/repeat-2.svg");
+                                enabled: !root.is-running;
+                                description: "Reset inputs to default loopback request";
+                                clicked => { root.reset-defaults(); }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            ActionButton {
+                                text: "GET";
+                                selected: root.method == "GET";
+                                enabled: !root.is-running;
+                                clicked => { root.method = "GET"; }
+                            }
+                            ActionButton {
+                                text: "POST";
+                                selected: root.method == "POST";
+                                enabled: !root.is-running;
+                                clicked => { root.method = "POST"; }
+                            }
+                        }
+
+                        // Sub-tabs: Headers and Body
+                        HorizontalLayout {
+                            spacing: 6px;
+                            ActionButton {
+                                text: "Headers";
+                                selected: !root.request-body-tab;
+                                clicked => { root.request-body-tab = false; }
+                            }
+                            ActionButton {
+                                text: "Body (UTF-8)";
+                                selected: root.request-body-tab;
+                                clicked => { root.request-body-tab = true; }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+
+                        // Multiline Editor for Headers or Body
+                        if !root.request-body-tab: RepeaterEditorView {
+                            min-height: 220px;
+                            preferred-height: 320px;
+                            text <=> root.headers;
+                            label: "Request Headers";
+                            placeholder: "Enter HTTP headers (Name: Value per line)...";
+                        }
+                        if root.request-body-tab: RepeaterEditorView {
+                            min-height: 220px;
+                            preferred-height: 320px;
+                            text <=> root.body;
+                            label: "Request Body";
+                            placeholder: "Enter UTF-8 request body...";
+                        }
+                    }
+                }
+
+                // --- Response Card ---
+                if !root.compact || root.show-response: Rectangle {
+                    horizontal-stretch: 1;
+                    background: AppTheme.bg-card;
+                    border-color: AppTheme.border-subtle;
+                    border-width: 1px;
+                    border-radius: 4px;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 10px;
+
+                        HorizontalLayout {
+                            Text {
+                                text: "Response";
+                                color: AppTheme.text-primary;
+                                font-size: 14px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            Text {
+                                text: root.status-summary;
+                                color: root.status-text == "Cancelled" ? AppTheme.text-secondary :
+                                    root.status-summary == "Failed" ? AppTheme.text-primary : AppTheme.text-secondary;
+                                font-size: 12px;
+                                font-weight: 500;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        if root.error-message != "" && root.status-text == "Cancelled": Rectangle {
+                            background: AppTheme.bg-surface;
+                            border-color: AppTheme.border-subtle;
+                            border-width: 1px;
+                            border-radius: 4px;
+                            HorizontalLayout {
+                                padding: 8px;
+                                Text {
+                                    text: "Info: " + root.error-message;
+                                    color: AppTheme.text-secondary;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        if root.error-message != "" && root.status-text != "Cancelled": Rectangle {
+                            background: AppTheme.bg-surface;
+                            border-color: AppTheme.border-control;
+                            border-width: 1px;
+                            border-radius: 4px;
+                            HorizontalLayout {
+                                padding: 8px;
+                                Text {
+                                    text: "Error: " + root.error-message;
+                                    color: AppTheme.text-primary;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        if root.body-is-binary: Rectangle {
+                            background: AppTheme.bg-surface;
+                            border-color: AppTheme.border-subtle;
+                            border-width: 1px;
+                            border-radius: 4px;
+                            HorizontalLayout {
+                                padding: 6px;
+                                Text {
+                                    text: "[Binary / non-textual payload — lossy hex/ASCII preview]";
+                                    color: AppTheme.text-muted;
+                                    font-size: 12px;
+                                }
+                            }
+                        }
+
+                        if root.http-truncated || root.preview-truncated: Rectangle {
+                            background: AppTheme.bg-surface;
+                            border-color: AppTheme.border-subtle;
+                            border-width: 1px;
+                            border-radius: 4px;
+                            HorizontalLayout {
+                                padding: 6px;
+                                Text {
+                                    text: root.http-truncated ?
+                                        "[HTTP response stream truncated at 2 MiB engine limit]" :
+                                        "[Response body preview truncated at preview limit (" + root.received-bytes + " bytes total)]";
+                                    color: AppTheme.text-muted;
+                                    font-size: 12px;
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 6px;
+                            ActionButton {
+                                text: "Headers";
+                                selected: !root.response-body-tab;
+                                clicked => { root.response-body-tab = false; }
+                            }
+                            ActionButton {
+                                text: "Body";
+                                selected: root.response-body-tab;
+                                clicked => { root.response-body-tab = true; }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+
+                        if !root.has-response && !root.is-running && root.error-message == "": VerticalLayout {
+                            alignment: center;
+                            spacing: 8px;
+                            min-height: 220px;
+                            Text {
+                                text: "No replay response";
+                                color: AppTheme.text-primary;
+                                font-size: 16px;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "Configure request parameters and click Send to execute against local loopback.";
+                                color: AppTheme.text-muted;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        if root.is-running && !root.has-response: VerticalLayout {
+                            alignment: center;
+                            spacing: 8px;
+                            min-height: 220px;
+                            Text {
+                                text: root.is-cancelling ? "Cancelling request..." : "Executing request...";
+                                color: AppTheme.text-primary;
+                                font-size: 16px;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "Waiting for response from loopback target...";
+                                color: AppTheme.text-muted;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        if root.has-response || root.error-message != "": VerticalLayout {
+                            if !root.response-body-tab: DocumentView {
+                                min-height: 220px;
+                                preferred-height: 320px;
+                                label: "Response Headers";
+                                text: root.response-headers;
+                                empty-text: "No response headers available";
+                            }
+                            if root.response-body-tab: DocumentView {
+                                min-height: 220px;
+                                preferred-height: 320px;
+                                label: "Response Body";
+                                text: root.response-body;
+                                empty-text: "Empty response body";
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
