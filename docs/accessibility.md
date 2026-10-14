@@ -9,7 +9,7 @@
 - The table/detail splitter is keyboard-adjustable and exposes a slider value/default range and increment/decrement actions.
 - Informative pages expose a focusable region with arrows, PageUp/PageDown, Home/End scrolling.
 - Read-only text documents remain selectable; keyboard cursor movement keeps their viewport in view.
-- Empty capture, stopped capture, no selection, empty body and unavailable replay are distinct messages. The StatusBar does not imply success with a permanently green indicator.
+- Empty capture, stopped capture, no selection, empty body, and distinct Repeater states (Idle, Running, Cancelling, Cancelled, Completed, Failed) provide clear contextual messages. The Rust engine coordinates five lifecycle phases (`Idle`, `Running`, `Completed`, `Failed`, `Cancelled`), while the UI surfaces a transient `Cancelling` state while awaiting worker cancellation. The StatusBar does not imply success with a permanently green indicator.
 - AboutSlint is the official toolkit component, not a locally reconstructed credit.
 
 ## Toolkit limits and validation boundaries
@@ -24,4 +24,4 @@ Solid sRGB pairs: #a0a0a0 on #202020 = 6.23:1; #808080 boundary on #202020 = 4.1
 
 ## Reproduce native snapshots
 
-`cargo run -p kaska-desktop --example ui_snapshots --locked --jobs 2 -- <output-directory>` opens a Windows native Slint window with deterministic UI fixtures. Its render fixtures do not open sockets. After capturing the visual matrix, it exercises the unchanged AppController against a controlled loopback server on ephemeral ports: capture, selection, clear, stop and port release. It checks pointer/keyboard selection with 10,000 rows and saves real renderer pixels as PPM. Use SLINT_SCALE_FACTOR for process-local scale testing; it does not change OS settings. Convert PPM to PNG for visual review. The existing suite and release headless test provide additional network coverage.
+`cargo run -p kaska-desktop --example ui_snapshots --locked --jobs 2 -- <output-directory>` opens a Windows native Slint window with deterministic UI fixtures. Its render fixtures do not open sockets. After capturing the visual matrix across seven window sizes and four main views, it exercises the AppController against controlled loopback listeners on ephemeral ports: capture, selection, clear, stop, and port release. It verifies pointer/keyboard selection with 10,000 virtual rows, executes real loopback HTTP requests in Repeater, and captures all six visible states (Idle, Running, Completed, Cancelling, Cancelled, and Failed), validating real response display, cooperative cancellation against held sockets, and out-of-scope rejection. Real renderer pixels are saved as PPM. Use SLINT_SCALE_FACTOR for process-local scale testing; it does not change OS settings. Convert PPM to PNG for visual review. The existing suite and release headless test provide additional network coverage.
