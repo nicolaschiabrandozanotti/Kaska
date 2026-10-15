@@ -17,6 +17,7 @@ pub mod platform;
 fn click(window: &slint::Window, x: f32, y: f32) {
     use slint::platform::{PointerEventButton, WindowEvent};
     let position = slint::LogicalPosition::new(x, y);
+    window.dispatch_event(WindowEvent::PointerMoved { position });
     window.dispatch_event(WindowEvent::PointerPressed {
         position,
         button: PointerEventButton::Left,
@@ -52,6 +53,41 @@ fn save_snapshot(window: &slint::Window, path: &std::path::Path) {
     for pixel in snapshot.as_slice() {
         file.write_all(&[pixel.r, pixel.g, pixel.b]).unwrap();
     }
+}
+/// Contextual graphic observable for focus detection via rendered pixel line analysis.
+/// Evaluates whether a contiguous border line in the specified candidate Y rows and X interval
+/// exhibits the AppTheme.border-focus color (#e0e0e0, RGB >= 210, 210, 210).
+/// NOTE: Pixel-based focus detection is an external contextual graphic observable from
+/// framebuffer rendering; it is not a direct introspection of internal Slint widget focus state
+/// nor a formal certification of accessibility / assistive technologies (AT).
+fn is_horizontal_line_focus(
+    window: &slint::Window,
+    y_candidates: &[u32],
+    x_start: u32,
+    x_end: u32,
+) -> bool {
+    if let Ok(snap) = window.take_snapshot() {
+        let w = snap.width();
+        let h = snap.height();
+        let data = snap.as_slice();
+        for &y in y_candidates {
+            if y < h {
+                let mut focus_count = 0;
+                for x in x_start..=x_end {
+                    if x < w {
+                        let p = data[(y * w + x) as usize];
+                        if p.r >= 210 && p.g >= 210 && p.b >= 210 {
+                            focus_count += 1;
+                        }
+                    }
+                }
+                if focus_count >= (x_end.saturating_sub(x_start) / 2) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 fn fixture(count: usize) -> ModelRc<TrafficItem> {
     Rc::new(VecModel::from(
@@ -134,12 +170,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cancel_server_handle,
     ))));
 
+    let diag_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let diag_server_port = diag_listener.local_addr()?.port();
+    let (diag_req_tx, diag_req_rx) = std::sync::mpsc::channel();
+    let (diag_rel_tx, diag_rel_rx) = std::sync::mpsc::channel();
+    let diag_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let diag_stop_clone = diag_stop.clone();
+    let diag_server_handle = std::thread::spawn(move || {
+        diag_listener.set_nonblocking(true).ok();
+        while !diag_stop_clone.load(std::sync::atomic::Ordering::SeqCst) {
+            match diag_listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).ok();
+                    let mut buf = [0u8; 1024];
+                    let _ = std::io::Read::read(&mut stream, &mut buf);
+                    let _ = diag_req_tx.send(());
+                    let _ = diag_rel_rx.recv_timeout(Duration::from_secs(5));
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let diag_server = Rc::new(RefCell::new(Some((
+        diag_req_rx,
+        diag_rel_tx,
+        diag_stop,
+        diag_server_handle,
+    ))));
+
     let weak = app.as_weak();
     let step = Rc::new(Cell::new(0usize));
     let cancel_server_cell = cancel_server.clone();
     let cancel_port = cancel_server_port;
     let cancel_wait = Rc::new(Cell::new(0usize));
     let cancel_wait_cell = cancel_wait.clone();
+    let diag_server_cell = diag_server.clone();
+    let diag_port = diag_server_port;
+    let diag_wait = Rc::new(Cell::new(0usize));
+    let diag_wait_cell = diag_wait.clone();
     let timer = slint::Timer::default();
     timer.start(
         slint::TimerMode::Repeated,
@@ -411,8 +482,322 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 save_snapshot(app.window(), &output.join("repeater-failed.ppm"));
                 println!("PASS: Repeater Failed out-of-scope snapshot");
-                println!("PASS: All Repeater native snapshots and state verifications completed successfully");
+                println!("PASS: All Repeater native snapshots completed. Starting diagnostic phase 1.3C-1A...");
+                step.set(tick + 1);
+                return;
+            } else if index == sizes.len() * 4 + 9 {
+                // TC-FOC-01: Sidebar Keyboard Navigation (Tab, Return, Space)
+                if tick.is_multiple_of(2) {
+                    app.set_active_tab(0);
+                    resize(app.window(), 1180.0, 680.0);
+                    click(app.window(), 80.0, 82.0);
+                    assert_eq!(app.get_active_tab(), 0, "TC-FOC-01: Precondition tab 0");
+                    key(app.window(), slint::platform::Key::Tab);
+                    key(app.window(), slint::platform::Key::Return);
+                    assert_eq!(app.get_active_tab(), 1, "TC-FOC-01: Tab + Return activates Repeater");
+                    save_snapshot(app.window(), &output.join("tc-foc-01-sidebar-tab-return.ppm"));
+
+                    key(app.window(), slint::platform::Key::Tab);
+                    app.window().dispatch_event(slint::platform::WindowEvent::KeyPressed {
+                        text: slint::platform::Key::Space.into(),
+                    });
+                    app.window().dispatch_event(slint::platform::WindowEvent::KeyReleased {
+                        text: slint::platform::Key::Space.into(),
+                    });
+                    assert_eq!(app.get_active_tab(), 2, "TC-FOC-01: Tab + Space activates Scope");
+                    save_snapshot(app.window(), &output.join("tc-foc-01-sidebar-tab-space.ppm"));
+
+                    click(app.window(), 80.0, 126.0);
+                    assert_eq!(app.get_active_tab(), 1);
+                    println!("PASS: TC-FOC-01 Sidebar navigation via Tab, Return, Space");
+                    step.set(tick + 1);
+                    return;
+                }
+                step.set(tick + 1);
+                return;
+            } else if index == sizes.len() * 4 + 10 {
+                // TC-FOC-02 & TC-FOC-03: Send via Return and Space against held connection
+                if tick.is_multiple_of(2) {
+                    app.set_active_tab(1);
+                    app.invoke_reset_repeater_defaults();
+                    app.set_repeater_status_text("Idle".into());
+                    app.set_repeater_error_message("".into());
+                    app.set_repeater_url(format!("http://127.0.0.1:{diag_port}/diag-return").into());
+                    app.set_repeater_headers(format!("Host: 127.0.0.1:{diag_port}").into());
+
+                    // 1. Establish verifiable Idle precondition
+                    assert!(!app.get_repeater_is_running(), "TC-FOC-02 Precondition: Must be Idle");
+                    assert_eq!(app.get_repeater_status_text(), "Idle", "TC-FOC-02 Precondition: status must be Idle");
+                    assert!(app.get_repeater_error_message().is_empty(), "TC-FOC-02 Precondition: error message must be empty");
+                    {
+                        let guard = diag_server_cell.borrow();
+                        let (req_rx, _, _, _) = guard.as_ref().expect("diag server active");
+                        assert!(req_rx.try_recv().is_err(), "TC-FOC-02 Precondition: No requests before Return");
+                    }
+
+                    // 2. Send receives focus through a diagnostic route that does NOT activate its callback:
+                    // Focus url-input via pointer
+                    click(app.window(), 400.0, 180.0);
+                    {
+                        let guard = diag_server_cell.borrow();
+                        let (req_rx, _, _, _) = guard.as_ref().expect("diag server active");
+                        assert!(req_rx.try_recv().is_err(), "TC-FOC-02 Precondition: Focusing URL input must not dispatch request");
+                    }
+
+                    // Press Tab to navigate focus from url-input to Send
+                    key(app.window(), slint::platform::Key::Tab);
+
+                    // 3. Corroborate that Send received focus and no request occurred before Return
+                    let send_focus = is_horizontal_line_focus(app.window(), &[188, 206], 230, 270);
+                    println!("DIAGNOSTIC OBSERVABLE: TC-FOC-02 Send received focus via Tab without click: {send_focus}");
+                    assert!(
+                        send_focus,
+                        "TC-FOC-02: Send button must acquire observable focus indicator via Tab before Return"
+                    );
+                    {
+                        let guard = diag_server_cell.borrow();
+                        let (req_rx, _, _, _) = guard.as_ref().expect("diag server active");
+                        assert!(req_rx.try_recv().is_err(), "TC-FOC-02: Zero requests must be sent before Return");
+                    }
+
+                    // 4. Inject Return exactly once
+                    key(app.window(), slint::platform::Key::Return);
+
+                    // 5. Check arrival of loopback request and absence of duplicate requests
+                    {
+                        let guard = diag_server_cell.borrow();
+                        let (req_rx, _, _, _) = guard.as_ref().expect("diag server active");
+                        req_rx.recv_timeout(Duration::from_secs(2)).expect("TC-FOC-02: Request must reach diag server upon Return");
+                        assert!(
+                            req_rx.try_recv().is_err(),
+                            "TC-FOC-02: Exactly one request dispatched upon Return (no duplicate request received)"
+                        );
+                    }
+
+                    // 6. Verify Running state and absence of contradictory/double-dispatch error
+                    assert!(app.get_repeater_is_running(), "TC-FOC-02: Repeater must be running after Return");
+                    assert!(app.get_repeater_error_message().is_empty(), "TC-FOC-02: Error message must be empty (no double dispatch), got: {}", app.get_repeater_error_message());
+
+                    // 7. Save snapshot
+                    save_snapshot(app.window(), &output.join("tc-foc-02-send-return-running.ppm"));
+                    println!("PASS: TC-FOC-02 Send via Return initiated running state cleanly without double dispatch");
+
+                    // TC-FOC-03: Tab to Cancel and activate via Return (Zero program fallback!)
+                    key(app.window(), slint::platform::Key::Tab);
+                    let cancel_focus = is_horizontal_line_focus(app.window(), &[188, 206], 320, 360);
+                    println!("DIAGNOSTIC OBSERVABLE: TC-FOC-03 Cancel received focus via Tab: {cancel_focus}");
+                    assert!(
+                        cancel_focus,
+                        "TC-FOC-03: Cancel button must acquire observable focus indicator via Tab before Return"
+                    );
+
+                    key(app.window(), slint::platform::Key::Return);
+                    assert!(app.get_repeater_is_cancelling(), "TC-FOC-03: is-cancelling must be true immediately after Tab + Return without fallback");
+
+                    step.set(tick + 1);
+                    return;
+                }
+                if live_controller.repeater().is_in_flight() || app.get_repeater_status_text() != "Cancelled" {
+                    diag_wait_cell.set(diag_wait_cell.get() + 1);
+                    assert!(diag_wait_cell.get() < 20, "Timed out waiting for TC-FOC-02 cancel. Status: {}", app.get_repeater_status_text());
+                    return;
+                }
+                diag_wait_cell.set(0);
+                {
+                    let guard = diag_server_cell.borrow();
+                    let (_, rel_tx, _, _) = guard.as_ref().expect("diag server active");
+                    let _ = rel_tx.send(());
+                }
+                save_snapshot(app.window(), &output.join("tc-foc-02-cancelled.ppm"));
+                println!("PASS: TC-FOC-02/03 Send & Cancel transition completed");
+                step.set(tick + 1);
+                return;
+            } else if index == sizes.len() * 4 + 11 {
+                // TC-FOC-04 & TC-FOC-05: Send via Pointer & Cooperative Cancellation
+                if tick.is_multiple_of(2) {
+                    app.set_repeater_url(format!("http://127.0.0.1:{diag_port}/diag-pointer").into());
+                    app.set_repeater_headers(format!("Host: 127.0.0.1:{diag_port}").into());
+                    click(app.window(), 255.0, 212.0);
+                    {
+                        let guard = diag_server_cell.borrow();
+                        let (req_rx, _, _, _) = guard.as_ref().expect("diag server active");
+                        req_rx.recv_timeout(Duration::from_secs(2)).expect("TC-FOC-04: Pointer request must reach diag server");
+                    }
+                    assert!(app.get_repeater_is_running(), "TC-FOC-04: Running after pointer click");
+                    save_snapshot(app.window(), &output.join("tc-foc-04-send-pointer-running.ppm"));
+                    println!("PASS: TC-FOC-04 Send via pointer initiated running state");
+
+                    click(app.window(), 345.0, 212.0);
+                    assert!(app.get_repeater_is_cancelling(), "TC-FOC-05: Cancel via pointer must set is-cancelling to true without fallback");
+                    save_snapshot(app.window(), &output.join("tc-foc-05-cancelling.ppm"));
+
+                    step.set(tick + 1);
+                    return;
+                }
+                if live_controller.repeater().is_in_flight() || app.get_repeater_status_text() != "Cancelled" {
+                    diag_wait_cell.set(diag_wait_cell.get() + 1);
+                    assert!(diag_wait_cell.get() < 20, "Timed out waiting for TC-FOC-05 cancel. Status: {}", app.get_repeater_status_text());
+                    return;
+                }
+                diag_wait_cell.set(0);
+                {
+                    let guard = diag_server_cell.borrow();
+                    let (_, rel_tx, _, _) = guard.as_ref().expect("diag server active");
+                    let _ = rel_tx.send(());
+                }
+                save_snapshot(app.window(), &output.join("tc-foc-05-cancelled.ppm"));
+                println!("PASS: TC-FOC-05 Cooperative cancellation completed");
+                step.set(tick + 1);
+                return;
+            } else if index == sizes.len() * 4 + 12 {
+                // TC-FOC-06: Immediate Response (Running -> Completed)
+                if tick.is_multiple_of(2) {
+                    app.set_repeater_url(format!("http://127.0.0.1:{server_port}/api/status").into());
+                    app.set_repeater_headers(format!("Host: 127.0.0.1:{server_port}\nAccept: application/json").into());
+                    click(app.window(), 255.0, 212.0);
+                    step.set(tick + 1);
+                    return;
+                }
+                if live_controller.repeater().is_in_flight() {
+                    return;
+                }
+                assert_eq!(app.get_repeater_status_code(), 200, "TC-FOC-06: 200 OK expected");
+                assert_eq!(app.get_repeater_status_text(), "OK");
+                assert!(!app.get_repeater_is_running());
+                save_snapshot(app.window(), &output.join("tc-foc-06-completed.ppm"));
+                println!("PASS: TC-FOC-06 Immediate response execution & status verification");
+                step.set(tick + 1);
+                return;
+            } else if index == sizes.len() * 4 + 13 {
+                // TC-FOC-07: Input persistence across view destruction
+                if tick.is_multiple_of(2) {
+                    app.set_repeater_method("PUT".into());
+                    app.set_repeater_url("http://127.0.0.1:8989/custom/diagnostics".into());
+                    app.set_repeater_headers("X-Diagnostic: TC-FOC-07\nHost: 127.0.0.1:8989".into());
+                    app.set_repeater_body("{\"persistence_test\":true}".into());
+
+                    app.set_active_tab(0);
+                    assert_eq!(app.get_active_tab(), 0);
+                    step.set(tick + 1);
+                    return;
+                }
+                app.set_active_tab(1);
+                assert_eq!(app.get_active_tab(), 1);
+                assert_eq!(app.get_repeater_method(), "PUT", "TC-FOC-07: Method persisted");
+                assert_eq!(app.get_repeater_url(), "http://127.0.0.1:8989/custom/diagnostics", "TC-FOC-07: URL persisted");
+                assert_eq!(app.get_repeater_headers(), "X-Diagnostic: TC-FOC-07\nHost: 127.0.0.1:8989", "TC-FOC-07: Headers persisted");
+                assert_eq!(app.get_repeater_body(), "{\"persistence_test\":true}", "TC-FOC-07: Body persisted");
+                save_snapshot(app.window(), &output.join("tc-foc-07-repeater-restored.ppm"));
+                app.invoke_reset_repeater_defaults();
+                println!("PASS: TC-FOC-07 Input persistence across view destruction verified");
+                step.set(tick + 1);
+                return;
+            } else if index == sizes.len() * 4 + 14 {
+                // TC-FOC-08 State 1: Focus multiline Headers editor via pointer
+                if tick.is_multiple_of(2) {
+                    app.set_active_tab(1);
+                    click(app.window(), 380.0, 350.0);
+                    step.set(tick + 1);
+                    return;
+                }
+                save_snapshot(app.window(), &output.join("tc-foc-08-1-editor-initial.ppm"));
+                let ed_focus_1 = is_horizontal_line_focus(app.window(), &[272, 273], 250, 600);
+                let resp_headers_focus_1 =
+                    is_horizontal_line_focus(app.window(), &[146, 147, 176, 177], 850, 930);
+                println!(
+                    "DIAGNOSTIC OBSERVABLE: TC-FOC-08 State 1 (Initial Click) Editor focused: {ed_focus_1}, Response Headers focused: {resp_headers_focus_1}"
+                );
+                assert!(
+                    ed_focus_1,
+                    "TC-FOC-08 State 1: Headers editor must have observable focus initially"
+                );
+                assert!(
+                    !resp_headers_focus_1,
+                    "TC-FOC-08 State 1: Response headers button must not have focus initially"
+                );
+                step.set(tick + 1);
+                return;
+            } else if index == sizes.len() * 4 + 15 {
+                // TC-FOC-08 State 2: Inject Tab and diagnose focus departure / content integrity
+                if tick.is_multiple_of(2) {
+                    let headers_before = app.get_repeater_headers().to_string();
+                    key(app.window(), slint::platform::Key::Tab);
+                    let headers_after = app.get_repeater_headers().to_string();
+                    let tab_inserted =
+                        headers_after.contains('\t') || headers_after.len() > headers_before.len();
+                    println!(
+                        "DIAGNOSTIC OBSERVABLE: TC-FOC-08 State 2 Tab inserted literal tab: {tab_inserted}"
+                    );
+                    assert_eq!(
+                        app.get_repeater_headers(),
+                        headers_before.as_str(),
+                        "TC-FOC-08: Content must remain unchanged after Tab"
+                    );
+                    step.set(tick + 1);
+                    return;
+                }
+                save_snapshot(app.window(), &output.join("tc-foc-08-2-after-tab.ppm"));
+                let ed_focus_2 = is_horizontal_line_focus(app.window(), &[272, 273], 250, 600);
+                let resp_headers_focus_2 =
+                    is_horizontal_line_focus(app.window(), &[146, 147, 176, 177], 850, 930);
+                let send_focus_2 = is_horizontal_line_focus(app.window(), &[188, 206], 230, 270);
+                let cancel_focus_2 = is_horizontal_line_focus(app.window(), &[188, 206], 320, 360);
+                println!(
+                    "DIAGNOSTIC OBSERVABLE: TC-FOC-08 State 2 (After Tab) Editor focused: {ed_focus_2}, Response Headers focused: {resp_headers_focus_2}, Send focused: {send_focus_2}, Cancel focused: {cancel_focus_2}"
+                );
+                assert!(
+                    !ed_focus_2,
+                    "TC-FOC-08 State 2: Headers editor must lose observable focus indicator after Tab"
+                );
+                assert!(
+                    resp_headers_focus_2,
+                    "TC-FOC-08 State 2: Response headers button must acquire observable focus indicator after Tab"
+                );
+                step.set(tick + 1);
+                return;
+            } else if index == sizes.len() * 4 + 16 {
+                // TC-FOC-08 State 3: Inject Shift+Tab and diagnose focus return / content integrity
+                if tick.is_multiple_of(2) {
+                    let headers_before = app.get_repeater_headers().to_string();
+                    app.window().dispatch_event(slint::platform::WindowEvent::KeyPressed {
+                        text: slint::platform::Key::Shift.into(),
+                    });
+                    key(app.window(), slint::platform::Key::Tab);
+                    app.window().dispatch_event(slint::platform::WindowEvent::KeyReleased {
+                        text: slint::platform::Key::Shift.into(),
+                    });
+                    let headers_after = app.get_repeater_headers().to_string();
+                    let shift_inserted = headers_after.len() > headers_before.len();
+                    println!(
+                        "DIAGNOSTIC OBSERVABLE: TC-FOC-08 State 3 Shift+Tab inserted text: {shift_inserted}"
+                    );
+                    assert_eq!(
+                        app.get_repeater_headers(),
+                        headers_before.as_str(),
+                        "TC-FOC-08: Content must remain unchanged after Shift+Tab"
+                    );
+                    step.set(tick + 1);
+                    return;
+                }
+                save_snapshot(app.window(), &output.join("tc-foc-08-3-after-shift-tab.ppm"));
+                let ed_focus_3 = is_horizontal_line_focus(app.window(), &[272, 273], 250, 600);
+                let resp_headers_focus_3 =
+                    is_horizontal_line_focus(app.window(), &[146, 147, 176, 177], 850, 930);
+                println!(
+                    "DIAGNOSTIC OBSERVABLE: TC-FOC-08 State 3 (After Shift+Tab) Editor focused: {ed_focus_3}, Response Headers focused: {resp_headers_focus_3}"
+                );
+                assert!(
+                    ed_focus_3,
+                    "TC-FOC-08 State 3: Headers editor must recover observable focus indicator after Shift+Tab"
+                );
+                assert!(
+                    !resp_headers_focus_3,
+                    "TC-FOC-08 State 3: Response headers button must lose observable focus indicator after Shift+Tab"
+                );
+                println!("PASS: TC-FOC-08 Multiline Tab/Shift+Tab behavior diagnosed across 3 distinct states");
+                println!("PASS: All diagnostic TC-FOC test phases completed successfully");
                 slint::quit_event_loop().unwrap();
+                return;
             } else {
                 let long_document = index == sizes.len() * 4;
                 if tick.is_multiple_of(2) {
@@ -458,6 +843,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let run_res = app.run();
     if let Some((_, rel_tx, handle)) = cancel_server.borrow_mut().take() {
+        let _ = rel_tx.send(());
+        let _ = handle.join();
+    }
+    if let Some((_, rel_tx, stop, handle)) = diag_server.borrow_mut().take() {
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = rel_tx.send(());
         let _ = handle.join();
     }
