@@ -22,11 +22,12 @@ Esta guía proporciona las instrucciones necesarias para clonar, compilar, ejecu
   - **Modo headless (`--headless-test`):** No requiere servidor gráfico ni display en runtime (bifurca antes de la inicialización de ventana Slint).
 
 > [!NOTE]
-> **Estado de verificación de plataformas y CI:**
-> - **Tests locales Windows:** Verificados al 100% en host Windows x86_64.
-> - **CI Windows / Linux (GitHub Actions):** Flujo automatizado en `.github/workflows/ci.yml` ejecutado en cada `push` y `pull_request` a las ramas `main` y `develop` sobre runners `windows-latest` y `ubuntu-latest`. La ejecución postmerge del Hito 1.2 (Run `38510967689`) certificó 63/63 tests pasando en cada plataforma en dicha corrida, `cargo fmt --check`, `cargo clippy -- -D warnings`, builds dev/release, smoke test headless (`--headless-test`) y verificación estricta de sockets libres.
-> - **Validación Semántica `actionlint`:** Automatizada en el pipeline de Ubuntu mediante descarga de `actionlint` v1.7.12 con verificación estricta de suma SHA-256 (`8aca8db...`), validando los archivos `.github/workflows/*.yml`.
-> - **Soporte visual Slint en Linux:** Pendiente de comprobación funcional interactiva sobre sesión de escritorio Linux real (X11 / Wayland con display activo).
+> **Estado de verificación de plataformas y niveles de validación:**
+> - **CI Windows / Ubuntu (GitHub Actions):** Flujo automatizado en `.github/workflows/ci.yml` ejecutado en cada `push` y `pull_request` a las ramas `main` y `develop` sobre runners `windows-latest` y `ubuntu-latest`. La ejecución postmerge del PR #10 certificó 100% de tests unitarios y de integración pasando en ambas plataformas (`cargo test --workspace --locked --jobs 2 -- --test-threads=2`), `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --jobs 2 -- -D warnings`, builds dev/release, smoke test headless (`--headless-test`), verificación estricta de sockets libres y análisis semántico de workflows mediante `actionlint` v1.7.12 en Ubuntu (con verificación de suma SHA-256).
+> - **Tests Headless (`--headless-test`):** Validación funcional autónoma que no requiere entorno gráfico ni display en runtime. Arranca sockets TCP locales en loopback, procesa transacciones HTTP y valida aislamiento y captura sin inicializar la ventana Slint.
+> - **Pruebas con Renderer Real (`ui_snapshots`):** Validación visual interactiva en Windows abriendo una ventana nativa de Slint con fixtures determinísticos en siete tamaños y cuatro vistas principales. Ejercita el AppController contra listeners loopback efímeros (captura, selección, limpieza, detención y liberación de sockets), verifica selección con 10.000 filas virtuales y ejecuta solicitudes HTTP reales en Repeater validando sus seis estados visibles (Idle, Running, Completed, Cancelling, Cancelled, Failed) con volcado de píxeles PPM.
+> - **Benchmark y Pilotos de Rendimiento (`perf_baseline`):** Arnés de rendimiento con microbenchmarks sintéticos (modelos, parser, store, controller) y pilotos end-to-end N=5, N=25 y N=100 sobre bucle local controlado con recolección de métricas de proceso (WorkingSet, Pagefile y CPU en Windows; VmRSS y RssAnon en Linux).
+> - **Pruebas Gráficas en Linux (Pendientes):** El soporte visual e interactivo bajo sesión de escritorio Linux real (X11 o compositor Wayland con display activo) permanece clasificado como **pendiente de validación funcional interactiva directa** (los tests en CI y el modo headless ejecutan sin display).
 > - **Comportamiento de `--locked`:** El flag `--locked` no deshabilita el acceso a la red por sí mismo (a diferencia de `--offline`), sino que exige que Cargo respete estrictamente el archivo `Cargo.lock` sin actualizar ni recalcular versiones de dependencias.
 
 ---
@@ -62,16 +63,46 @@ cargo run -p kaska-desktop --jobs 2 -- --headless-test
 
 ## 4. Pruebas y Control de Calidad
 
+### 4.1. Suite Estándar y Linter (Integración Continua)
 ```bash
-# 1. Ejecutar todos los tests unitarios y de integración con hilos acotados y lockfile estricto
+# Ejecutar todos los tests unitarios y de integración con hilos acotados y lockfile estricto
 cargo test --workspace --locked --jobs 2 -- --test-threads=2
 
-# 2. Verificar formato con rustfmt
+# Verificar formato con rustfmt
 cargo fmt --all -- --check
 
-# 3. Análisis de linter estricto con Clippy
+# Análisis estricto con Clippy sin advertencias
 cargo clippy --workspace --all-targets --jobs 2 -- -D warnings
 ```
+
+### 4.2. Modo Verificación Headless (Sin Display)
+Ejecutable en entornos sin servidor gráfico (CI, servidores Linux remotos):
+```bash
+cargo run -p kaska-desktop --jobs 2 -- --headless-test
+```
+
+### 4.3. Verificación Visual de UI con Renderer Real (`ui_snapshots`)
+Abre una ventana Slint nativa en Windows, recorre la matriz visual completa (siete tamaños y cuatro vistas principales), comprueba interacción de foco y selección virtualizada con 10.000 filas, y valida los seis estados visibles de Repeater sobre listeners loopback efímeros guardando snapshots PPM:
+```bash
+cargo run -p kaska-desktop --example ui_snapshots --locked --jobs 2 -- <directorio-de-salida>
+```
+
+### 4.4. Arnés de Rendimiento y Microbenchmarks (`perf_baseline`)
+Ejecuta microbenchmarks sintéticos (modelos, parsing, store, controller) y pilotos end-to-end sobre loopback controlado (N=5, N=25, N=100) con captura de métricas de proceso:
+```bash
+# Validación de microbenchmarks
+cargo run -p kaska-desktop --example perf_baseline --locked --jobs 2 -- --validate [--output-dir <directorio>]
+
+# Pilotos loopback controlados (N=5, N=25, N=100)
+cargo run -p kaska-desktop --example perf_baseline --locked --jobs 2 -- --pilot-5 [--output-dir <directorio>]
+cargo run -p kaska-desktop --example perf_baseline --locked --jobs 2 -- --pilot-25 [--output-dir <directorio>]
+cargo run -p kaska-desktop --example perf_baseline --locked --jobs 2 -- --pilot-100 [--output-dir <directorio>]
+
+# Suite completa de microbenchmarks y pilotos N=5 y N=25
+cargo run -p kaska-desktop --example perf_baseline --locked --jobs 2 -- --all [--output-dir <directorio>]
+```
+> [!IMPORTANT]
+> Los directorios de salida para `ui_snapshots` y `perf_baseline` deben ubicarse estrictamente fuera del repositorio y de los worktrees protegidos para prevenir la creación de archivos no rastreados accidentales. No ejecutar estos examples durante gates de sincronización documental.
 
 ---
 

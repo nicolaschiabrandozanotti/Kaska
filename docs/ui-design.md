@@ -20,6 +20,15 @@ Sidebar is 192 logical pixels, or 120 below 1050. Header actions move to a secon
 
 Slint 1.18.1 intrinsic-layout analysis rejects/warns about responsive geometry feeding back into native size constraints. AppWindow samples its size via changed width/height callbacks before binding shell geometry; this breaks the dependency cycle while preserving native resize behavior.
 
+## Validation and platform boundaries
+
+- **Real validations performed:** The UI design and adaptive layouts are verified in Windows using the `ui_snapshots` harness across seven distinct window sizes (from 640x300 to 1920x1080), covering Inspector, Scope, Settings, and Repeater (across all six visible states). Synthetic pointer and keyboard events validate virtual scrolling, FocusScope keyboard selection, and splitter adjustments.
+- **Limits of visual evidence:** Saved visual snapshots (PPM/PNG) demonstrate correct geometry, responsive breakpoints, and theme palette rendering on Windows MSVC. However, rasterized visual evidence does not inspect or validate semantic assistive technology trees or OS accessibility events.
+- **Platform-specific behavior (Windows vs. Linux):** On Windows, monitor work areas are inspected via User32 (`platform.rs`) and initial bounds are calculated with scale factor awareness. On Linux, geometry initialization relies on standard toolkit defaults; interactive GUI testing on live X11 and Wayland sessions remains **pending real platform validation** (CI and headless runs do not instantiate a display server).
+- **Screen readers and assistive APIs:** Full compatibility with screen readers (NVDA, Narrator, Orca) has not been tested in live interactive sessions and is explicitly classified as pending.
+- **Dynamic system high contrast:** The UI utilizes an approved static neutral charcoal theme with statically verified sRGB contrast ratios. Dynamic switching based on OS high-contrast mode triggers is neither implemented nor demonstrated.
+- **Standards certification:** No WCAG compliance (A, AA, AAA) or comprehensive AccessKit grid compliance is claimed.
+
 ## Integrated architecture modules
 
 1. `theme.slint`, `action_button.slint`, `document_view.slint`, `key_value_row.slint`, `assets/icons`, notices.

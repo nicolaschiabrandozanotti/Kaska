@@ -14,9 +14,13 @@
 
 ## Toolkit limits and validation boundaries
 
-Slint 1.18.1 has FocusScope, accessible properties/actions and AccessKit. Default crate features enable accessibility; a role alone does not implement complete grid semantics. The traffic view is exposed as a list of transaction summaries, not a complete accessible cell grid. Toolkit AboutSlint internals are preserved. Tooltips are supplemental and are not the only source of essential labels.
-
-Native renderer and dispatched-input smoke tests do not prove NVDA/Narrator or Orca compatibility. Screen-reader behavior, mixed-monitor DPI migration and Linux window-manager behavior require direct platform testing. No WCAG compliance certification is claimed. High-contrast OS modes are not automatically mapped into the approved custom theme.
+- **Validaciones reales realizadas:** Se han verificado formalmente la navegación y captura de foco por teclado (`FocusScope` en lista virtualizada de transacciones, ajuste de splitter con teclado, manejo de Enter/Space y pérdida de foco en `ActionButton`), junto con la ejecución del arnés nativo `ui_snapshots` en Windows con despacho de eventos sintéticos y fixtures determinísticos.
+- **Límites de la evidencia visual:** Los snapshots visuales (PPM/PNG) aportan evidencia de renderizado y comportamiento observado bajo configuraciones ensayadas (escalado DPI relativo y contraste estático de la paleta en Windows); no prueban corrección universal, accesibilidad semántica ni certificación WCAG. Asimismo, la evidencia visual no examina el árbol de accesibilidad del sistema operativo, eventos de accesibilidad ni anuncios hablados.
+- **Comportamiento específico de plataforma (Windows frente a Linux):** En Windows, Slint se integra con AccessKit mediante UI Automation (UIA) y el arranque ajusta las cotas iniciales con User32. En Linux, la pila de accesibilidad depende de AT-SPI sobre DBus y la interacción con gestores de ventanas (X11 / Wayland) no ha sido verificada en un entorno interactivo real.
+- **Linux X11/Wayland como validación gráfica pendiente:** La ejecución de la interfaz gráfica interactiva bajo servidores X11 o compositores Wayland en Linux permanece clasificada como validación gráfica pendiente de comprobación funcional directa (el CI y el modo `--headless-test` operan sin servidor de display).
+- **Lectores de pantalla pendientes de pruebas reales:** No se han realizado pruebas de interoperabilidad con lectores de pantalla reales (NVDA, Narrator en Windows u Orca en Linux). Su compatibilidad operativa no está demostrada ni afirmada.
+- **Alto contraste dinámico del sistema no demostrado:** El tema aprobado es un esquema fijo neutral de carbón con ratios estáticos de contraste sRGB. No existe mapeo ni conmutación dinámica ante modos de alto contraste del sistema operativo (como Windows High Contrast Mode o temas accesibles del entorno de escritorio).
+- **Ausencia de certificaciones:** No se certifica conformidad con estándares WCAG (niveles A, AA o AAA) ni compatibilidad semántica completa con AccessKit más allá de los roles y acciones provistos por defecto por Slint 1.18.1. La tabla de tráfico se expone como una lista de resúmenes de transacciones y no como una cuadrícula de celdas accesible completa. Tooltips y badges son complementarios y no reemplazan etiquetas esenciales.
 
 ## Contrast
 
