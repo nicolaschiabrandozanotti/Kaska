@@ -11,14 +11,15 @@ Kaska **no es un wrapper ni un frontend** de herramientas de terceros (Burp Suit
 - **Network Inspector:** Inspección estructurada de solicitudes y respuestas HTTP/1.1 en tiempo real, análisis de cabeceras, cookies, cuerpos, estados de framing RFC 9112 y latencia.
 - **Proxy de Captura y Streaming:** Motor proxy nativo con soporte de chunked transfer, desacoplamiento entre buffer de transmisión e inspección, y protección de alcance loopback.
 - **Target Scope:** Control estricto pre y post-resolución DNS que confina el tráfico exclusivamente al laboratorio autorizado (`127.0.0.1`, `localhost`, `::1`).
-- **Compositor Repeater (Preliminar):** Vista de composición manual e inspección en interfaz gráfica (actualmente en estado de compositor preliminar de UI; el despacho activo de solicitudes de red desde Repeater se implementará en hitos posteriores).
+- **HTTP Repeater Interactivo:** Composición, edición y despacho interactivo de solicitudes HTTP/1.1 directas sobre endpoints loopback autorizados (`127.0.0.1`, `localhost`, `[::1]`). Modelo de trabajo asíncrono en hilo nativo secundario desacoplado del event loop de la UI, concurrencia acotada (single-flight locking), cancelación cooperativa (con distinción entre solicitud, estado intermedio Cancelling y confirmación terminal del worker), visualización estructurada y previsualización de respuestas acotada (presupuesto UI de 64 KiB, límite defensivo de 256 KiB) con detección automática y volcado hex/ASCII para cargas binarias e indicadores explícitos de truncamiento.
 - **Herramientas de red nativas:** Arquitectura preparada para incorporar gradualmente capacidades adicionales sin depender de binarios externos.
 
 ### ⚠️ Estado Actual del Proyecto (Experimental / Pre-1.0)
 Kaska se encuentra en **desarrollo activo y estado experimental**:
-- **Alcance actual:** Centrado exclusivamente en captura, streaming e inspección de tráfico **HTTP/1.1 local/loopback controlado** (`127.0.0.1`, `localhost`, `::1`).
+- **Alcance actual:** Centrado exclusivamente en captura, streaming, inspección y reemisión de tráfico **HTTP/1.1 local/loopback controlado** (`127.0.0.1`, `localhost`, `::1`). Destinos fuera de alcance, esquemas o métodos no autorizados son rechazados preventivamente antes de la transmisión.
 - **HTTPS / TLS MITM:** **No implementado todavía.** Las solicitudes `CONNECT` reciben respuesta explícita `501 Not Implemented`.
-- **Repeater:** Actualmente opera como **compositor preliminar de UI** sin despacho de red activo.
+- **HTTP Repeater:** Despacho interactivo HTTP/1.1 loopback funcional en modelo asíncrono desacoplado de la UI. Soporta ejecución single-flight (una única solicitud en vuelo a la vez), cancelación cooperativa (solicitud desde UI, estado transitorio Cancelling y confirmación terminal del worker sin asumir interrupción instantánea de I/O), inspección formateada de cabeceras y preview acotado de cuerpo (presupuesto base de 64 KiB, límite defensivo de 256 KiB) con detección y renderizado hex/ASCII para cargas binarias.
+- **Herramientas de verificación y rendimiento:** Incluye arneses nativos reproducibles para validación visual de UI (`ui_snapshots`) y microbenchmarks con pilotos loopback (`perf_baseline`) sobre entornos controlados.
 
 **Principios fundamentales:**
 1. **100% Nativo:** Cero dependencias de Electron, NodeJS embebido o navegadores pesados.
@@ -94,6 +95,28 @@ cargo test --workspace --locked --jobs 2 -- --test-threads=2
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --jobs 2 -- -D warnings
 ```
+
+### 5. Verificación Visual de UI (`ui_snapshots`)
+Ejecuta la validación visual interactiva en Windows con Slint nativo, explorando siete tamaños de ventana, cuatro vistas principales, selección virtualizada con 10.000 filas y los seis estados visibles de Repeater sobre listeners loopback efímeros, guardando snapshots en formato PPM:
+```bash
+cargo run -p kaska-desktop --example ui_snapshots --locked --jobs 2 -- <directorio-de-salida>
+```
+
+### 6. Arnés de Rendimiento y Microbenchmarks (`perf_baseline`)
+Ejecuta microbenchmarks sintéticos de modelos, parsing, store y controladores, junto con pilotos end-to-end sobre bucle local controlado (N=5, N=25, N=100) y recolección de métricas de proceso:
+```bash
+# Validación de microbenchmarks
+cargo run -p kaska-desktop --example perf_baseline --locked --jobs 2 -- --validate [--output-dir <directorio>]
+
+# Pilotos loopback controlados (N=5, N=25, N=100)
+cargo run -p kaska-desktop --example perf_baseline --locked --jobs 2 -- --pilot-5 [--output-dir <directorio>]
+cargo run -p kaska-desktop --example perf_baseline --locked --jobs 2 -- --pilot-25 [--output-dir <directorio>]
+cargo run -p kaska-desktop --example perf_baseline --locked --jobs 2 -- --pilot-100 [--output-dir <directorio>]
+
+# Suite completa de microbenchmarks y pilotos N=5 y N=25
+cargo run -p kaska-desktop --example perf_baseline --locked --jobs 2 -- --all [--output-dir <directorio>]
+```
+*(Nota: El `<directorio-de-salida>` debe especificarse fuera del repositorio y de los worktrees protegidos).*
 
 ---
 
