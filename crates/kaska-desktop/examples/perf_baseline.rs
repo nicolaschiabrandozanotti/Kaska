@@ -33,7 +33,7 @@ pub mod platform;
 use kaska_http::models::{
     HttpMethod, HttpRequest, HttpResponse, HttpTransaction, TransactionState,
 };
-use kaska_http::proxy::NativeProxyServer;
+use kaska_http::proxy::{BoundedProxyObserver, NativeProxyServer};
 use kaska_http::scope::AuditScope;
 use kaska_http::store::{create_shared_store, TrafficStore};
 use kaska_http::test_server::ControlledTestServer;
@@ -56,6 +56,7 @@ pub enum CliCommand {
     Validate,
     Pilot5,
     Pilot25,
+    Pilot100,
     All,
     Help,
 }
@@ -68,7 +69,7 @@ pub struct CliConfig {
 }
 
 /// Strict, deterministic command-line argument parser.
-/// Rejects any unrecognized argument or load parameter N > 25.
+/// Rejects any unrecognized argument or load parameter N > 100.
 pub fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
     let mut command: Option<CliCommand> = None;
     let mut output_dir: Option<PathBuf> = None;
@@ -95,6 +96,12 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
                 }
                 command = Some(CliCommand::Pilot25);
             }
+            "--pilot-100" => {
+                if command.is_some() {
+                    return Err(format!("Conflicting command specified: '{}'", arg));
+                }
+                command = Some(CliCommand::Pilot100);
+            }
             "--all" => {
                 if command.is_some() {
                     return Err(format!("Conflicting command specified: '{}'", arg));
@@ -116,7 +123,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
             }
             unknown => {
                 return Err(format!(
-                    "Unknown or unauthorized argument '{}'. Allowed options: --validate, --pilot-5, --pilot-25, --all, --output-dir <DIR>, --help",
+                    "Unknown or unauthorized argument '{}'. Allowed options: --validate, --pilot-5, --pilot-25, --pilot-100, --all, --output-dir <DIR>, --help",
                     unknown
                 ));
             }
@@ -125,7 +132,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
     }
 
     let cmd = command.ok_or_else(|| {
-        "No command specified. Usage: perf_baseline [--validate | --pilot-5 | --pilot-25 | --all] [--output-dir <DIR>]".to_string()
+        "No command specified. Usage: perf_baseline [--validate | --pilot-5 | --pilot-25 | --pilot-100 | --all] [--output-dir <DIR>]".to_string()
     })?;
 
     Ok(CliConfig {
@@ -1347,6 +1354,228 @@ pub struct SafeTransactionSummary {
     pub has_response_body: bool,
 }
 
+/// Correlation resolution status indicating diagnostic integrity
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorrelationStatus {
+    Complete,
+    Incomplete,
+    Ambiguous,
+    NotFound,
+    Degraded,
+}
+
+impl CorrelationStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Complete => "COMPLETE",
+            Self::Incomplete => "INCOMPLETE",
+            Self::Ambiguous => "AMBIGUOUS",
+            Self::NotFound => "NOT_FOUND",
+            Self::Degraded => "DEGRADED",
+        }
+    }
+}
+
+/// Safe, zero-leak summary of a proxy diagnostic event for reporting and serialization
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafeProxyEventSummary {
+    pub conn_id: u64,
+    pub client_port: u16,
+    pub phase: String,
+    pub io_result: Option<String>,
+    pub termination_reason: Option<String>,
+    pub http_response_attempted: Option<u16>,
+    pub http_response_write_succeeded: Option<bool>,
+}
+
+/// Structured proxy-side diagnostic context correlating proxy events with client failure
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyFailureDiagnostic {
+    pub correlation_status: CorrelationStatus,
+    pub client_ephemeral_port: Option<u16>,
+    pub correlated_conn_id: Option<u64>,
+    pub correlated_termination_reason: Option<String>,
+    pub correlated_phase: Option<String>,
+    pub correlated_io_result: Option<String>,
+    pub terminal_event: Option<SafeProxyEventSummary>,
+    pub correlated_events: Vec<SafeProxyEventSummary>,
+    pub total_captured_events: usize,
+    pub observer_ring_capacity: usize,
+    pub observer_dropped_events: usize,
+}
+
+/// Pure, deterministic function to correlate proxy events for a given client ephemeral port.
+/// Returns a fully qualified ProxyFailureDiagnostic without side effects or I/O.
+pub fn correlate_proxy_diagnostics(
+    client_port: Option<u16>,
+    all_events: &[kaska_http::proxy::ProxyDiagnosticEvent],
+    total_captured: usize,
+    ring_cap: usize,
+    dropped_events: usize,
+) -> ProxyFailureDiagnostic {
+    let port = match client_port {
+        Some(p) => p,
+        None => {
+            return ProxyFailureDiagnostic {
+                correlation_status: CorrelationStatus::NotFound,
+                client_ephemeral_port: None,
+                correlated_conn_id: None,
+                correlated_termination_reason: None,
+                correlated_phase: None,
+                correlated_io_result: None,
+                terminal_event: None,
+                correlated_events: Vec::new(),
+                total_captured_events: total_captured,
+                observer_ring_capacity: ring_cap,
+                observer_dropped_events: dropped_events,
+            };
+        }
+    };
+
+    // Filter events matching the client port
+    let matching_events: Vec<&kaska_http::proxy::ProxyDiagnosticEvent> = all_events
+        .iter()
+        .filter(|ev| ev.client_port == port)
+        .collect();
+
+    if matching_events.is_empty() {
+        let status = if dropped_events > 0 {
+            CorrelationStatus::Degraded
+        } else {
+            CorrelationStatus::NotFound
+        };
+        return ProxyFailureDiagnostic {
+            correlation_status: status,
+            client_ephemeral_port: Some(port),
+            correlated_conn_id: None,
+            correlated_termination_reason: None,
+            correlated_phase: None,
+            correlated_io_result: None,
+            terminal_event: None,
+            correlated_events: Vec::new(),
+            total_captured_events: total_captured,
+            observer_ring_capacity: ring_cap,
+            observer_dropped_events: dropped_events,
+        };
+    }
+
+    // Check distinct conn_ids for this port
+    let mut conn_ids: Vec<u64> = matching_events.iter().map(|e| e.conn_id).collect();
+    conn_ids.sort_unstable();
+    conn_ids.dedup();
+
+    if conn_ids.len() > 1 {
+        // Port reuse / collision detected -> Ambiguous!
+        let safe_events = matching_events
+            .iter()
+            .map(|ev| SafeProxyEventSummary {
+                conn_id: ev.conn_id,
+                client_port: ev.client_port,
+                phase: format!("{:?}", ev.phase),
+                io_result: ev.io_result.as_ref().map(|res| format!("{:?}", res)),
+                termination_reason: ev.termination_reason.as_ref().map(|r| format!("{:?}", r)),
+                http_response_attempted: ev.http_response_attempted,
+                http_response_write_succeeded: ev.http_response_write_succeeded,
+            })
+            .collect();
+
+        return ProxyFailureDiagnostic {
+            correlation_status: CorrelationStatus::Ambiguous,
+            client_ephemeral_port: Some(port),
+            correlated_conn_id: None,
+            correlated_termination_reason: None,
+            correlated_phase: None,
+            correlated_io_result: None,
+            terminal_event: None,
+            correlated_events: safe_events,
+            total_captured_events: total_captured,
+            observer_ring_capacity: ring_cap,
+            observer_dropped_events: dropped_events,
+        };
+    }
+
+    let conn_id = conn_ids[0];
+    let safe_events: Vec<SafeProxyEventSummary> = matching_events
+        .iter()
+        .map(|ev| SafeProxyEventSummary {
+            conn_id: ev.conn_id,
+            client_port: ev.client_port,
+            phase: format!("{:?}", ev.phase),
+            io_result: ev.io_result.as_ref().map(|res| format!("{:?}", res)),
+            termination_reason: ev.termination_reason.as_ref().map(|r| format!("{:?}", r)),
+            http_response_attempted: ev.http_response_attempted,
+            http_response_write_succeeded: ev.http_response_write_succeeded,
+        })
+        .collect();
+
+    // Locate the terminal event: the last event that contains a termination_reason
+    let terminal_event_summary = safe_events
+        .iter()
+        .rfind(|ev| ev.termination_reason.is_some())
+        .cloned();
+
+    let (status, term_reason, phase, io_res) = if let Some(ref term) = terminal_event_summary {
+        let st = if dropped_events > 0 {
+            CorrelationStatus::Degraded
+        } else {
+            CorrelationStatus::Complete
+        };
+        (
+            st,
+            term.termination_reason.clone(),
+            Some(term.phase.clone()),
+            term.io_result.clone(),
+        )
+    } else {
+        let st = if dropped_events > 0 {
+            CorrelationStatus::Degraded
+        } else {
+            CorrelationStatus::Incomplete
+        };
+        // In incomplete status, last event phase provides latest observed state
+        let latest_phase = safe_events.last().map(|e| e.phase.clone());
+        (st, None, latest_phase, None)
+    };
+
+    ProxyFailureDiagnostic {
+        correlation_status: status,
+        client_ephemeral_port: Some(port),
+        correlated_conn_id: Some(conn_id),
+        correlated_termination_reason: term_reason,
+        correlated_phase: phase,
+        correlated_io_result: io_res,
+        terminal_event: terminal_event_summary,
+        correlated_events: safe_events,
+        total_captured_events: total_captured,
+        observer_ring_capacity: ring_cap,
+        observer_dropped_events: dropped_events,
+    }
+}
+
+/// Pure function calculating the exact sleep duration for diagnostic polling.
+/// Returns Duration::ZERO if remaining diagnostic budget or scenario budget is zero.
+/// Otherwise returns min(poll_interval, remaining_diag_budget, remaining_scenario_budget).
+pub fn calculate_diagnostic_poll_sleep(
+    poll_interval: Duration,
+    elapsed_diag: Duration,
+    max_diag: Duration,
+    now: Instant,
+    deadline: Instant,
+) -> Duration {
+    let diag_rem = max_diag.saturating_sub(elapsed_diag);
+    if diag_rem.is_zero() {
+        return Duration::ZERO;
+    }
+    if now >= deadline {
+        return Duration::ZERO;
+    }
+    let scen_rem = deadline.duration_since(now);
+    if scen_rem.is_zero() {
+        return Duration::ZERO;
+    }
+    poll_interval.min(diag_rem).min(scen_rem)
+}
+
 /// Comprehensive failure diagnostic captured prior to process termination
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PilotFailureDiagnostic {
@@ -1361,6 +1590,7 @@ pub struct PilotFailureDiagnostic {
     pub error_message: String,
     pub store_transaction_count: usize,
     pub store_summary: Vec<SafeTransactionSummary>,
+    pub proxy_diagnostics: Option<ProxyFailureDiagnostic>,
     pub elapsed_since_start_ms: u64,
     pub remaining_budget_ms: Option<u64>,
     pub stop_signal_sent: bool,
@@ -1409,7 +1639,77 @@ pub fn format_failure_diagnostic_summary(d: &PilotFailureDiagnostic) -> String {
         "  • Stop Signal Sent: {}, Sockets Released: {}\n",
         d.stop_signal_sent, d.sockets_released
     ));
+    if let Some(ref pdiag) = d.proxy_diagnostics {
+        out.push_str("  • PROXY DIAGNOSTICS (Correlated by Client Ephemeral Port):\n");
+        out.push_str(&format!(
+            "    - Correlation Status: {}\n",
+            pdiag.correlation_status.as_str()
+        ));
+        if let Some(port) = pdiag.client_ephemeral_port {
+            out.push_str(&format!("    - Client Port: {}\n", port));
+        }
+        if let Some(cid) = pdiag.correlated_conn_id {
+            out.push_str(&format!("    - Proxy Conn ID: {}\n", cid));
+        }
+        if let Some(ref ph) = pdiag.correlated_phase {
+            out.push_str(&format!("    - Proxy Phase: {}\n", ph));
+        }
+        if let Some(ref tr) = pdiag.correlated_termination_reason {
+            out.push_str(&format!("    - Proxy Termination Reason: {}\n", tr));
+        }
+        if let Some(ref io) = pdiag.correlated_io_result {
+            out.push_str(&format!("    - Proxy I/O Result: {}\n", io));
+        }
+        if let Some(ref term) = pdiag.terminal_event {
+            out.push_str(&format!(
+                "    - Terminal Event: [conn:{}] phase={} term={:?} io={:?} resp_att={:?} resp_ok={:?}\n",
+                term.conn_id,
+                term.phase,
+                term.termination_reason,
+                term.io_result,
+                term.http_response_attempted,
+                term.http_response_write_succeeded
+            ));
+        }
+        out.push_str(&format!(
+            "    - Correlated Events Count: {}\n",
+            pdiag.correlated_events.len()
+        ));
+        for ev in &pdiag.correlated_events {
+            out.push_str(&format!(
+                "      * [conn:{}] phase={} term={:?} io={:?} resp_att={:?} resp_ok={:?}\n",
+                ev.conn_id,
+                ev.phase,
+                ev.termination_reason,
+                ev.io_result,
+                ev.http_response_attempted,
+                ev.http_response_write_succeeded
+            ));
+        }
+        out.push_str(&format!(
+            "    - Observer Status: total_captured={}, capacity={}, dropped={}\n",
+            pdiag.total_captured_events,
+            pdiag.observer_ring_capacity,
+            pdiag.observer_dropped_events
+        ));
+        match pdiag.correlation_status {
+            CorrelationStatus::Degraded => {
+                out.push_str("    - Note: Buffer capacity reached (Drop Newest policy; new events dropped). Diagnostic completeness degraded.\n");
+            }
+            CorrelationStatus::Ambiguous => {
+                out.push_str("    - Note: Ephemeral port collision detected across multiple connections. Causality ambiguous.\n");
+            }
+            CorrelationStatus::Incomplete => {
+                out.push_str("    - Note: Connection recorded in proxy but terminated abnormally without recording terminal event.\n");
+            }
+            CorrelationStatus::NotFound => {
+                out.push_str("    - Note: No proxy events recorded for this client port.\n");
+            }
+            CorrelationStatus::Complete => {}
+        }
+    }
     out.push_str("  • OBSERVABILITY LIMITATION: Client-side observations record socket disconnection but do not uniquely identify internal proxy branches without proxy-side instrumentation.\n");
+    out.push_str("  • STREAMING LIMITATION NOTE: In the pre-existing proxy architecture, client write interruptions during response streaming terminate the streaming loop via break, but proceed to normal transaction recording. A CompletedSuccessfully diagnostic event indicates that the proxy processing pipeline reached completion, but does not guarantee full byte delivery of streamed response bodies.\n");
     out.push_str("  • STORE OBSERVATION NOTE: The store transaction count and snapshot represent a point-in-time observation captured on the client error path. In-flight requests being processed asynchronously by background proxy worker threads may not have reached store insertion yet, or may still be pending.\n");
     out.push_str("  • PARITY NOTE: Critical failure fields (status, N, failed index, validated count, phase, I/O result, bytes received, observed store count, teardown status) have 1:1 semantic parity with JSON. JSON additionally provides structured transaction summaries and machine-readable metadata arrays.\n");
     out.push_str("--------------------------------------------------\n");
@@ -1498,8 +1798,111 @@ pub fn format_failure_diagnostic_json(d: &PilotFailureDiagnostic) -> String {
         tx_items.join(",")
     ));
 
+    match &d.proxy_diagnostics {
+        Some(pdiag) => {
+            let events_json: Vec<String> = pdiag
+                .correlated_events
+                .iter()
+                .map(|ev| {
+                    format!(
+                        "{{\"conn_id\":{},\"client_port\":{},\"phase\":\"{}\",\"io_result\":{},\"termination_reason\":{},\"http_response_attempted\":{},\"http_response_write_succeeded\":{}}}",
+                        ev.conn_id,
+                        ev.client_port,
+                        escape_json(&ev.phase),
+                        ev.io_result.as_ref().map(|s| format!("\"{}\"", escape_json(s))).unwrap_or_else(|| "null".to_string()),
+                        ev.termination_reason.as_ref().map(|s| format!("\"{}\"", escape_json(s))).unwrap_or_else(|| "null".to_string()),
+                        ev.http_response_attempted.map(|n| n.to_string()).unwrap_or_else(|| "null".to_string()),
+                        ev.http_response_write_succeeded.map(|b| b.to_string()).unwrap_or_else(|| "null".to_string())
+                    )
+                })
+                .collect();
+
+            json.push_str("    \"proxy_diagnostics\": {\n");
+            json.push_str(&format!(
+                "      \"correlation_status\": \"{}\",\n",
+                escape_json(pdiag.correlation_status.as_str())
+            ));
+            json.push_str(&format!(
+                "      \"client_ephemeral_port\": {},\n",
+                pdiag
+                    .client_ephemeral_port
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "null".to_string())
+            ));
+            json.push_str(&format!(
+                "      \"correlated_conn_id\": {},\n",
+                pdiag
+                    .correlated_conn_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "null".to_string())
+            ));
+            json.push_str(&format!(
+                "      \"correlated_termination_reason\": {},\n",
+                pdiag
+                    .correlated_termination_reason
+                    .as_ref()
+                    .map(|r| format!("\"{}\"", escape_json(r)))
+                    .unwrap_or_else(|| "null".to_string())
+            ));
+            json.push_str(&format!(
+                "      \"correlated_phase\": {},\n",
+                pdiag
+                    .correlated_phase
+                    .as_ref()
+                    .map(|ph| format!("\"{}\"", escape_json(ph)))
+                    .unwrap_or_else(|| "null".to_string())
+            ));
+            json.push_str(&format!(
+                "      \"correlated_io_result\": {},\n",
+                pdiag
+                    .correlated_io_result
+                    .as_ref()
+                    .map(|io| format!("\"{}\"", escape_json(io)))
+                    .unwrap_or_else(|| "null".to_string())
+            ));
+            match &pdiag.terminal_event {
+                Some(term) => {
+                    json.push_str(&format!(
+                        "      \"terminal_event\": {{\"conn_id\":{},\"client_port\":{},\"phase\":\"{}\",\"io_result\":{},\"termination_reason\":{},\"http_response_attempted\":{},\"http_response_write_succeeded\":{}}},\n",
+                        term.conn_id,
+                        term.client_port,
+                        escape_json(&term.phase),
+                        term.io_result.as_ref().map(|s| format!("\"{}\"", escape_json(s))).unwrap_or_else(|| "null".to_string()),
+                        term.termination_reason.as_ref().map(|s| format!("\"{}\"", escape_json(s))).unwrap_or_else(|| "null".to_string()),
+                        term.http_response_attempted.map(|n| n.to_string()).unwrap_or_else(|| "null".to_string()),
+                        term.http_response_write_succeeded.map(|b| b.to_string()).unwrap_or_else(|| "null".to_string())
+                    ));
+                }
+                None => {
+                    json.push_str("      \"terminal_event\": null,\n");
+                }
+            }
+            json.push_str(&format!(
+                "      \"correlated_events\": [{}],\n",
+                events_json.join(",")
+            ));
+            json.push_str(&format!(
+                "      \"total_captured_events\": {},\n",
+                pdiag.total_captured_events
+            ));
+            json.push_str(&format!(
+                "      \"observer_ring_capacity\": {},\n",
+                pdiag.observer_ring_capacity
+            ));
+            json.push_str(&format!(
+                "      \"observer_dropped_events\": {}\n",
+                pdiag.observer_dropped_events
+            ));
+            json.push_str("    },\n");
+        }
+        None => {
+            json.push_str("    \"proxy_diagnostics\": null,\n");
+        }
+    }
+
     json.push_str("    \"observability_limitations\": [\n");
     json.push_str("      \"CLIENT_OBSERVATION_NOTE: An EOF or socket error observed at the client indicates that the connection with the proxy terminated, but it does NOT uniquely identify whether the proxy failed at client reading, upstream connection, upstream writing, or upstream reading without proxy-side instrumentation.\",\n");
+    json.push_str("      \"STREAMING_LIMITATION_NOTE: In the pre-existing proxy architecture, client write interruptions during response streaming terminate the streaming loop via break, but proceed to normal transaction recording. A CompletedSuccessfully diagnostic event indicates that the proxy processing pipeline reached completion, but does not guarantee full byte delivery of streamed response bodies.\",\n");
     json.push_str("      \"STORE_OBSERVATION_NOTE: The store transaction count and snapshot represent a point-in-time observation captured on the client error path. In-flight requests being processed asynchronously by background proxy worker threads may not have reached store insertion yet, or may still be pending.\",\n");
     json.push_str("      \"PARITY_NOTE: Critical failure fields (status, target_n, failed_request_index, validated_requests_count, phase, io_result_type, bytes_received_len, store_transaction_count, stop_signal_sent, sockets_released) have 1:1 semantic parity between TXT summary and JSON report. JSON additionally provides the structured store_summary transaction array and machine-readable metadata.\"\n");
     json.push_str("    ]\n");
@@ -1545,6 +1948,7 @@ pub fn run_end_to_end_pilot(n: usize) -> Result<E2eScenarioResult, Box<PilotFail
             ),
             store_transaction_count: 0,
             store_summary: vec![],
+            proxy_diagnostics: None,
             elapsed_since_start_ms: 0,
             remaining_budget_ms: Some(SCENARIO_DEADLINE_SECS * 1000),
             stop_signal_sent: false,
@@ -1552,10 +1956,20 @@ pub fn run_end_to_end_pilot(n: usize) -> Result<E2eScenarioResult, Box<PilotFail
         }));
     }
 
-    // 2. Start Native Capturing Proxy Server
+    // 2. Start Native Capturing Proxy Server with Bounded Diagnostic Observer
     let store = create_shared_store();
     let scope = Arc::new(AuditScope::default());
-    let proxy = NativeProxyServer::new(proxy_port, Arc::clone(&store), scope, None);
+    let proxy_observer = Arc::new(BoundedProxyObserver::new(2000));
+    let observer_for_proxy = Arc::clone(&proxy_observer);
+    let proxy = NativeProxyServer::with_diagnostic_observer(
+        proxy_port,
+        Arc::clone(&store),
+        scope,
+        None,
+        Some(Arc::new(move |event| {
+            observer_for_proxy.record(event);
+        })),
+    );
     if let Err(e) = proxy.start() {
         test_server.stop();
         let ports_to_verify = [test_port];
@@ -1575,6 +1989,7 @@ pub fn run_end_to_end_pilot(n: usize) -> Result<E2eScenarioResult, Box<PilotFail
             ),
             store_transaction_count: 0,
             store_summary: vec![],
+            proxy_diagnostics: None,
             elapsed_since_start_ms: 0,
             remaining_budget_ms: Some(SCENARIO_DEADLINE_SECS * 1000),
             stop_signal_sent: true,
@@ -1614,6 +2029,7 @@ pub fn run_end_to_end_pilot(n: usize) -> Result<E2eScenarioResult, Box<PilotFail
                 error_message: format!("Failed to parse proxy address: {}", e),
                 store_transaction_count: 0,
                 store_summary: vec![],
+                proxy_diagnostics: None,
                 elapsed_since_start_ms: 0,
                 remaining_budget_ms: Some(SCENARIO_DEADLINE_SECS * 1000),
                 stop_signal_sent: true,
@@ -1623,6 +2039,7 @@ pub fn run_end_to_end_pilot(n: usize) -> Result<E2eScenarioResult, Box<PilotFail
     };
 
     let mut validated_count = 0;
+    let mut last_client_port: Option<u16> = None;
 
     let capture_diag_and_cleanup = |failed_idx: usize,
                                     val_count: usize,
@@ -1631,7 +2048,8 @@ pub fn run_end_to_end_pilot(n: usize) -> Result<E2eScenarioResult, Box<PilotFail
                                     err_kind: Option<String>,
                                     os_code: Option<i32>,
                                     bytes_len: usize,
-                                    msg: String|
+                                    msg: String,
+                                    client_port: Option<u16>|
      -> Box<PilotFailureDiagnostic> {
         let (tx_count, safe_summary) = {
             let st = store.lock().unwrap();
@@ -1655,6 +2073,50 @@ pub fn run_end_to_end_pilot(n: usize) -> Result<E2eScenarioResult, Box<PilotFail
                 .collect();
             (count, summary)
         };
+
+        // Extract proxy diagnostics correlated by client ephemeral port.
+        // On the error path, perform a bounded wait (up to 100ms in 10ms intervals)
+        // strictly if remaining scenario budget allows, until the proxy observer records
+        // a terminal event for the connection, preventing incomplete snapshots from thread race.
+        let wait_start = Instant::now();
+        let max_diag_wait = Duration::from_millis(100);
+        let diag_poll_interval = Duration::from_millis(10);
+        while wait_start.elapsed() < max_diag_wait && Instant::now() < scenario_deadline {
+            let snap = proxy_observer.snapshot();
+            let has_terminal = if let Some(port) = client_port {
+                snap.iter()
+                    .any(|ev| ev.client_port == port && ev.termination_reason.is_some())
+            } else {
+                false
+            };
+            if has_terminal {
+                break;
+            }
+            let sleep_dur = calculate_diagnostic_poll_sleep(
+                diag_poll_interval,
+                wait_start.elapsed(),
+                max_diag_wait,
+                Instant::now(),
+                scenario_deadline,
+            );
+            if sleep_dur.is_zero() {
+                break;
+            }
+            std::thread::sleep(sleep_dur);
+        }
+
+        let all_events = proxy_observer.snapshot();
+        let total_captured = proxy_observer.total_captured();
+        let ring_cap = proxy_observer.capacity();
+        let dropped_events = proxy_observer.dropped_count();
+
+        let proxy_diag = Some(correlate_proxy_diagnostics(
+            client_port,
+            &all_events,
+            total_captured,
+            ring_cap,
+            dropped_events,
+        ));
 
         test_server.stop();
         proxy.stop();
@@ -1681,6 +2143,7 @@ pub fn run_end_to_end_pilot(n: usize) -> Result<E2eScenarioResult, Box<PilotFail
             error_message: msg,
             store_transaction_count: tx_count,
             store_summary: safe_summary,
+            proxy_diagnostics: proxy_diag,
             elapsed_since_start_ms: elapsed.as_millis() as u64,
             remaining_budget_ms: remaining_budget,
             stop_signal_sent: true,
@@ -1702,6 +2165,7 @@ pub fn run_end_to_end_pilot(n: usize) -> Result<E2eScenarioResult, Box<PilotFail
                     None,
                     0,
                     e,
+                    last_client_port,
                 ));
             }
         };
@@ -1730,9 +2194,13 @@ pub fn run_end_to_end_pilot(n: usize) -> Result<E2eScenarioResult, Box<PilotFail
                         "Failed to connect to proxy on 127.0.0.1:{} within {:?}: {}",
                         proxy_port, connect_timeout, e
                     ),
+                    None,
                 ));
             }
         };
+
+        let current_client_port = stream.local_addr().ok().map(|a| a.port());
+        last_client_port = current_client_port;
 
         let remaining = match calculate_remaining_budget(Instant::now(), scenario_deadline) {
             Ok(rem) => rem,
@@ -1748,6 +2216,7 @@ pub fn run_end_to_end_pilot(n: usize) -> Result<E2eScenarioResult, Box<PilotFail
                     None,
                     0,
                     e,
+                    current_client_port,
                 ));
             }
         };
@@ -1764,6 +2233,7 @@ pub fn run_end_to_end_pilot(n: usize) -> Result<E2eScenarioResult, Box<PilotFail
                 e.raw_os_error(),
                 0,
                 format!("Failed to set write timeout: {}", e),
+                current_client_port,
             ));
         }
 
@@ -1800,6 +2270,7 @@ pub fn run_end_to_end_pilot(n: usize) -> Result<E2eScenarioResult, Box<PilotFail
                 e.raw_os_error(),
                 0,
                 format!("Write to proxy failed at request {}: {}", i, e),
+                current_client_port,
             ));
         }
 
@@ -1823,6 +2294,7 @@ pub fn run_end_to_end_pilot(n: usize) -> Result<E2eScenarioResult, Box<PilotFail
                     e.os_code,
                     e.bytes_read,
                     e.message,
+                    current_client_port,
                 ));
             }
         };
@@ -1849,6 +2321,7 @@ pub fn run_end_to_end_pilot(n: usize) -> Result<E2eScenarioResult, Box<PilotFail
                     "Request {} response validation failed in phase VALIDATE_RESPONSE: {}",
                     i, e
                 ),
+                current_client_port,
             ));
         }
 
@@ -1881,6 +2354,7 @@ pub fn run_end_to_end_pilot(n: usize) -> Result<E2eScenarioResult, Box<PilotFail
                 "Validation failure: captured {} transactions in store, expected {}",
                 captured_count, n
             ),
+            last_client_port,
         ));
     }
 
@@ -1895,6 +2369,7 @@ pub fn run_end_to_end_pilot(n: usize) -> Result<E2eScenarioResult, Box<PilotFail
             0,
             "Validation failure: ephemeral sockets were not freed on shutdown within timeout"
                 .to_string(),
+            last_client_port,
         ));
     }
 
@@ -1922,6 +2397,9 @@ pub struct JsonReportParams<'a> {
     pub prf01_25: Option<&'a ModuleResult>,
     pub prf02_25: Option<&'a ModuleResult>,
     pub e2e_25: Option<&'a E2eScenarioResult>,
+    pub prf01_100: Option<&'a ModuleResult>,
+    pub prf02_100: Option<&'a ModuleResult>,
+    pub e2e_100: Option<&'a E2eScenarioResult>,
     pub prf06: &'a ModuleResult,
     pub failure_diagnostic: Option<&'a PilotFailureDiagnostic>,
 }
@@ -2127,6 +2605,29 @@ pub fn format_json_report(params: &JsonReportParams<'_>) -> String {
     ));
     json.push_str("  },\n");
 
+    json.push_str("  \"pilot_100\": {\n");
+    json.push_str(&format!(
+        "    \"prf01_clone\": {},\n",
+        format_stats_json(params.prf01_100.and_then(|m| m.stats.as_ref()))
+    ));
+    json.push_str(&format!(
+        "    \"prf01_transform\": {},\n",
+        format_stats_json(params.prf01_100.and_then(|m| m.secondary_stats.as_ref()))
+    ));
+    json.push_str(&format!(
+        "    \"prf02_get_all\": {},\n",
+        format_stats_json(params.prf02_100.and_then(|m| m.stats.as_ref()))
+    ));
+    json.push_str(&format!(
+        "    \"prf02_get_by_id\": {},\n",
+        format_stats_json(params.prf02_100.and_then(|m| m.secondary_stats.as_ref()))
+    ));
+    json.push_str(&format!(
+        "    \"e2e\": {}\n",
+        format_e2e_json(params.e2e_100)
+    ));
+    json.push_str("  },\n");
+
     json.push_str("  \"invariants\": {\n");
     json.push_str("    \"traffic_store_max_capacity\": 10000,\n");
     json.push_str("    \"limit_type\": \"count_only\",\n");
@@ -2248,6 +2749,7 @@ fn main() {
         println!("  --validate    Execute probe validation without network load");
         println!("  --pilot-5     Execute controlled pilot scenario N=5 exclusively");
         println!("  --pilot-25    Execute controlled pilot scenario N=25 exclusively");
+        println!("  --pilot-100   Execute controlled pilot scenario N=100 exclusively");
         println!("  --all         Execute sequential pilot scenarios N=5 and N=25 exclusively");
         println!("  --help, -h    Display this help message");
         println!();
@@ -2338,6 +2840,9 @@ fn main() {
             prf01_25: None,
             prf02_25: None,
             e2e_25: None,
+            prf01_100: None,
+            prf02_100: None,
+            e2e_100: None,
             prf06: &prf06,
             failure_diagnostic: None,
         };
@@ -2364,11 +2869,16 @@ fn main() {
     let mut prf02_25: Option<ModuleResult> = None;
     let mut e2e_25: Option<E2eScenarioResult> = None;
 
+    let mut prf01_100: Option<ModuleResult> = None;
+    let mut prf02_100: Option<ModuleResult> = None;
+    let mut e2e_100: Option<E2eScenarioResult> = None;
+
     let mut failure_diagnostic: Option<PilotFailureDiagnostic> = None;
 
     let execute_pilot_5 = config.command == CliCommand::Pilot5 || config.command == CliCommand::All;
     let execute_pilot_25 =
         config.command == CliCommand::Pilot25 || config.command == CliCommand::All;
+    let execute_pilot_100 = config.command == CliCommand::Pilot100;
 
     if execute_pilot_5 {
         println!("\n>>> RUNNING PILOT STAGE 1: N = 5");
@@ -2434,6 +2944,38 @@ fn main() {
         }
     }
 
+    if failure_diagnostic.is_none() && execute_pilot_100 {
+        println!("\n>>> RUNNING PILOT STAGE 3: N = 100");
+        log_accumulator.push_str("\n>>> RUNNING PILOT STAGE 3: N = 100\n");
+
+        let r1 = run_prf01_microbenchmark(100, 5);
+        let s1 = format_module_summary(&r1);
+        print!("{}", s1);
+        log_accumulator.push_str(&s1);
+        prf01_100 = Some(r1);
+
+        let r2 = run_prf02_microbenchmark(100, 5);
+        let s2 = format_module_summary(&r2);
+        print!("{}", s2);
+        log_accumulator.push_str(&s2);
+        prf02_100 = Some(r2);
+
+        match run_end_to_end_pilot(100) {
+            Ok(e) => {
+                let e_str = format_e2e_summary(&e, 100);
+                print!("{}", e_str);
+                log_accumulator.push_str(&e_str);
+                e2e_100 = Some(e);
+            }
+            Err(diag) => {
+                let diag_str = format_failure_diagnostic_summary(&diag);
+                print!("{}", diag_str);
+                log_accumulator.push_str(&diag_str);
+                failure_diagnostic = Some(*diag);
+            }
+        }
+    }
+
     let prf06 = run_prf06_limits_check();
     let prf06_str = format_module_summary(&prf06);
     print!("{}", prf06_str);
@@ -2443,6 +2985,7 @@ fn main() {
         CliCommand::Validate => "--validate",
         CliCommand::Pilot5 => "--pilot-5",
         CliCommand::Pilot25 => "--pilot-25",
+        CliCommand::Pilot100 => "--pilot-100",
         CliCommand::All => "--all",
         CliCommand::Help => "--help",
     };
@@ -2458,6 +3001,9 @@ fn main() {
         prf01_25: prf01_25.as_ref(),
         prf02_25: prf02_25.as_ref(),
         e2e_25: e2e_25.as_ref(),
+        prf01_100: prf01_100.as_ref(),
+        prf02_100: prf02_100.as_ref(),
+        e2e_100: e2e_100.as_ref(),
         prf06: &prf06,
         failure_diagnostic: failure_diagnostic.as_ref(),
     };
@@ -2532,6 +3078,12 @@ mod tests {
             CliCommand::Pilot25
         );
         assert_eq!(
+            parse_cli_args(&["prog".into(), "--pilot-100".into()])
+                .unwrap()
+                .command,
+            CliCommand::Pilot100
+        );
+        assert_eq!(
             parse_cli_args(&["prog".into(), "--all".into()])
                 .unwrap()
                 .command,
@@ -2547,11 +3099,12 @@ mod tests {
 
     #[test]
     fn test_cli_parser_rejects_unauthorized_and_unknown_args() {
-        assert!(parse_cli_args(&["prog".into(), "--pilot-100".into()]).is_err());
+        assert!(parse_cli_args(&["prog".into(), "--pilot-101".into()]).is_err());
         assert!(parse_cli_args(&["prog".into(), "--pilot-500".into()]).is_err());
         assert!(parse_cli_args(&["prog".into(), "--pilot-1000".into()]).is_err());
         assert!(parse_cli_args(&["prog".into(), "5".into()]).is_err());
         assert!(parse_cli_args(&["prog".into(), "25".into()]).is_err());
+        assert!(parse_cli_args(&["prog".into(), "100".into()]).is_err());
         assert!(parse_cli_args(&["prog".into(), "--unknown".into()]).is_err());
         assert!(parse_cli_args(&["prog".into()]).is_err());
     }
@@ -2752,6 +3305,9 @@ mod tests {
             prf01_25: None,
             prf02_25: None,
             e2e_25: None,
+            prf01_100: None,
+            prf02_100: None,
+            e2e_100: None,
             prf06: &prf06,
             failure_diagnostic: None,
         };
@@ -2906,6 +3462,7 @@ mod tests {
                 has_request_body: true,
                 has_response_body: true,
             }],
+            proxy_diagnostics: None,
             elapsed_since_start_ms: 120,
             remaining_budget_ms: Some(14880),
             stop_signal_sent: true,
@@ -2924,6 +3481,9 @@ mod tests {
             prf01_25: None,
             prf02_25: None,
             e2e_25: None,
+            prf01_100: None,
+            prf02_100: None,
+            e2e_100: None,
             prf06: &prf06,
             failure_diagnostic: Some(&diag),
         };
@@ -2974,6 +3534,7 @@ mod tests {
                 .to_string(),
             store_transaction_count: 6,
             store_summary: vec![],
+            proxy_diagnostics: None,
             elapsed_since_start_ms: 120,
             remaining_budget_ms: Some(14880),
             stop_signal_sent: true,
@@ -2991,6 +3552,9 @@ mod tests {
             prf01_25: Some(&r1),
             prf02_25: Some(&r2),
             e2e_25: None,
+            prf01_100: None,
+            prf02_100: None,
+            e2e_100: None,
             prf06: &prf06,
             failure_diagnostic: Some(&diag),
         };
@@ -3043,6 +3607,7 @@ mod tests {
             error_message: "Empty HTTP response received".to_string(),
             store_transaction_count: 6,
             store_summary: vec![],
+            proxy_diagnostics: None,
             elapsed_since_start_ms: 100,
             remaining_budget_ms: None,
             stop_signal_sent: true,
@@ -3085,6 +3650,7 @@ mod tests {
                 .to_string(),
             store_transaction_count: 0,
             store_summary: vec![],
+            proxy_diagnostics: None,
             elapsed_since_start_ms: 120,
             remaining_budget_ms: None,
             stop_signal_sent: true,
@@ -3132,6 +3698,7 @@ mod tests {
                     has_response_body: false,
                 },
             ],
+            proxy_diagnostics: None,
             elapsed_since_start_ms: 150,
             remaining_budget_ms: Some(14850),
             stop_signal_sent: true,
@@ -3150,6 +3717,9 @@ mod tests {
             prf01_25: None,
             prf02_25: None,
             e2e_25: None,
+            prf01_100: None,
+            prf02_100: None,
+            e2e_100: None,
             prf06: &prf06,
             failure_diagnostic: Some(&diag_with_data),
         };
@@ -3667,5 +4237,823 @@ mod tests {
                 "bytes_read must strictly match accumulated amount"
             );
         }
+    }
+
+    #[test]
+    fn test_cli_parser_pilot_100_command() {
+        let cfg = parse_cli_args(&["prog".into(), "--pilot-100".into()]).unwrap();
+        assert_eq!(cfg.command, CliCommand::Pilot100);
+        assert_eq!(cfg.output_dir, None);
+
+        let cfg_dir = parse_cli_args(&[
+            "prog".into(),
+            "--pilot-100".into(),
+            "--output-dir".into(),
+            "/custom/dir".into(),
+        ])
+        .unwrap();
+        assert_eq!(cfg_dir.command, CliCommand::Pilot100);
+        assert_eq!(cfg_dir.output_dir, Some(PathBuf::from("/custom/dir")));
+    }
+
+    #[test]
+    fn test_cli_parser_rejects_pilot_101_and_unauthorized() {
+        assert!(parse_cli_args(&["prog".into(), "--pilot-101".into()]).is_err());
+        assert!(parse_cli_args(&["prog".into(), "--pilot-200".into()]).is_err());
+        assert!(parse_cli_args(&["prog".into(), "--pilot-1000".into()]).is_err());
+        assert!(parse_cli_args(&["prog".into(), "--pilot-0".into()]).is_err());
+    }
+
+    #[test]
+    fn test_cli_parser_rejects_conflicting_commands_with_100() {
+        assert!(
+            parse_cli_args(&["prog".into(), "--pilot-100".into(), "--pilot-5".into()]).is_err()
+        );
+        assert!(
+            parse_cli_args(&["prog".into(), "--pilot-100".into(), "--pilot-25".into()]).is_err()
+        );
+        assert!(parse_cli_args(&["prog".into(), "--pilot-100".into(), "--all".into()]).is_err());
+        assert!(
+            parse_cli_args(&["prog".into(), "--pilot-100".into(), "--validate".into()]).is_err()
+        );
+    }
+
+    #[test]
+    fn test_all_command_preserves_n5_and_n25_exclusively() {
+        let cfg = parse_cli_args(&["prog".into(), "--all".into()]).unwrap();
+        assert_eq!(cfg.command, CliCommand::All);
+        assert_ne!(cfg.command, CliCommand::Pilot100);
+        let execute_pilot_5 = cfg.command == CliCommand::Pilot5 || cfg.command == CliCommand::All;
+        let execute_pilot_25 = cfg.command == CliCommand::Pilot25 || cfg.command == CliCommand::All;
+        let execute_pilot_100 = cfg.command == CliCommand::Pilot100;
+        assert!(execute_pilot_5);
+        assert!(execute_pilot_25);
+        assert!(!execute_pilot_100);
+    }
+
+    #[test]
+    fn test_json_report_serialization_pilot_100() {
+        let r1 = run_prf01_microbenchmark(100, 5);
+        let r2 = run_prf02_microbenchmark(100, 5);
+        let prf06 = run_prf06_limits_check();
+
+        let e2e_synthetic = E2eScenarioResult {
+            target_dispatched: 100,
+            transactions_captured: 100,
+            wall_clock_duration: Duration::from_millis(3500),
+            sockets_released: true,
+            validation_passed: true,
+            initial_metrics: ProcessMetrics {
+                working_set_bytes: Some(5_000_000),
+                private_bytes: Some(1_000_000),
+                anonymous_rss_bytes: None,
+                cpu_time_ms: Some(10),
+            },
+            final_metrics: ProcessMetrics {
+                working_set_bytes: Some(6_500_000),
+                private_bytes: Some(1_800_000),
+                anonymous_rss_bytes: None,
+                cpu_time_ms: Some(95),
+            },
+            error_message: None,
+        };
+
+        let params = JsonReportParams {
+            run_id: "test-run-100",
+            timestamp_utc: "2026-10-16T14:00:00Z",
+            command_str: "--pilot-100",
+            seed: DEFAULT_FIXED_SEED,
+            prf01_5: None,
+            prf02_5: None,
+            e2e_5: None,
+            prf01_25: None,
+            prf02_25: None,
+            e2e_25: None,
+            prf01_100: Some(&r1),
+            prf02_100: Some(&r2),
+            e2e_100: Some(&e2e_synthetic),
+            prf06: &prf06,
+            failure_diagnostic: None,
+        };
+
+        let json = format_json_report(&params);
+        assert!(json.contains("\"command\": \"--pilot-100\""));
+        assert!(json.contains("\"status\": \"PASS\""));
+        assert!(json.contains("\"pilot_100\": {"));
+        assert!(json.contains("\"dispatched\":100"));
+        assert!(json.contains("\"captured\":100"));
+        assert!(json.contains("\"validation_passed\":true"));
+        assert!(json.contains("\"working_set_delta_bytes\":1500000"));
+        assert!(json.contains("\"private_bytes_delta\":800000"));
+        assert!(json.contains("\"cpu_delta_ms\":85"));
+    }
+
+    #[test]
+    fn test_json_report_preserves_pilot5_pilot25_and_invariants() {
+        let prf06 = run_prf06_limits_check();
+        let params = JsonReportParams {
+            run_id: "test-compat-run",
+            timestamp_utc: "2026-10-16T14:00:00Z",
+            command_str: "--pilot-100",
+            seed: DEFAULT_FIXED_SEED,
+            prf01_5: None,
+            prf02_5: None,
+            e2e_5: None,
+            prf01_25: None,
+            prf02_25: None,
+            e2e_25: None,
+            prf01_100: None,
+            prf02_100: None,
+            e2e_100: None,
+            prf06: &prf06,
+            failure_diagnostic: None,
+        };
+
+        let json = format_json_report(&params);
+        assert!(json.contains("\"pilot_5\": {\n    \"prf01_clone\": \"NOT_AVAILABLE\""));
+        assert!(json.contains("\"pilot_25\": {\n    \"prf01_clone\": \"NOT_AVAILABLE\""));
+        assert!(json.contains("\"pilot_100\": {\n    \"prf01_clone\": \"NOT_AVAILABLE\""));
+        assert!(json.contains("\"invariants\": {"));
+        assert!(json.contains("\"traffic_store_max_capacity\": 10000"));
+        assert!(json.contains("\"limit_type\": \"count_only\""));
+    }
+
+    #[test]
+    fn test_failure_diagnostic_synthetic_n100() {
+        let prf06 = run_prf06_limits_check();
+        let diag_100 = PilotFailureDiagnostic {
+            target_n: 100,
+            failed_request_index: 34,
+            validated_requests_count: 33,
+            phase: DiagnosticPhase::ValidateResponse,
+            io_result_type: "EOF_ZERO_BYTES".to_string(),
+            error_kind: None,
+            os_error_code: None,
+            bytes_received_len: 0,
+            error_message: "Request 34 response validation failed: Empty HTTP response received"
+                .to_string(),
+            store_transaction_count: 33,
+            store_summary: vec![],
+            proxy_diagnostics: None,
+            elapsed_since_start_ms: 1250,
+            remaining_budget_ms: Some(13750),
+            stop_signal_sent: true,
+            sockets_released: true,
+        };
+
+        let params = JsonReportParams {
+            run_id: "test-fail-100",
+            timestamp_utc: "2026-10-16T14:00:00Z",
+            command_str: "--pilot-100",
+            seed: DEFAULT_FIXED_SEED,
+            prf01_5: None,
+            prf02_5: None,
+            e2e_5: None,
+            prf01_25: None,
+            prf02_25: None,
+            e2e_25: None,
+            prf01_100: None,
+            prf02_100: None,
+            e2e_100: None,
+            prf06: &prf06,
+            failure_diagnostic: Some(&diag_100),
+        };
+
+        let json = format_json_report(&params);
+        assert!(json.contains("\"status\": \"FAILED\""));
+        assert!(json.contains("\"target_n\": 100"));
+        assert!(json.contains("\"failed_request_index\": 34"));
+        assert!(json.contains("\"validated_requests_count\": 33"));
+        assert!(json.contains("\"io_result_type\": \"EOF_ZERO_BYTES\""));
+
+        let summary = format_failure_diagnostic_summary(&diag_100);
+        assert!(summary.contains("VALIDATION FAILURE in End-to-End Pilot (N=100)"));
+        assert!(summary.contains("Failed Request Index: 34 (Validated: 33/100)"));
+    }
+
+    #[test]
+    fn test_proxy_diagnostic_json_serialization_with_and_without_diagnostics() {
+        // 1. Without proxy diagnostics: json field must be null
+        let diag_none = PilotFailureDiagnostic {
+            target_n: 100,
+            failed_request_index: 11,
+            validated_requests_count: 10,
+            phase: DiagnosticPhase::ValidateResponse,
+            io_result_type: "EOF_ZERO_BYTES".to_string(),
+            error_kind: None,
+            os_error_code: None,
+            bytes_received_len: 0,
+            error_message: "EOF received".to_string(),
+            store_transaction_count: 10,
+            store_summary: vec![],
+            proxy_diagnostics: None,
+            elapsed_since_start_ms: 500,
+            remaining_budget_ms: Some(14500),
+            stop_signal_sent: true,
+            sockets_released: true,
+        };
+        let json_none = format_failure_diagnostic_json(&diag_none);
+        assert!(json_none.contains("\"proxy_diagnostics\": null"));
+
+        // 2. With proxy diagnostics: json field must contain structured correlated context
+        let terminal_event = SafeProxyEventSummary {
+            conn_id: 11,
+            client_port: 54321,
+            phase: "UpstreamReadHeader".to_string(),
+            io_result: Some("Ok(0)".to_string()),
+            termination_reason: Some("NormalClosure".to_string()),
+            http_response_attempted: None,
+            http_response_write_succeeded: None,
+        };
+        let pdiag = ProxyFailureDiagnostic {
+            correlation_status: CorrelationStatus::Complete,
+            client_ephemeral_port: Some(54321),
+            correlated_conn_id: Some(11),
+            correlated_termination_reason: Some("NormalClosure".to_string()),
+            correlated_phase: Some("UpstreamReadHeader".to_string()),
+            correlated_io_result: Some("OkZero".to_string()),
+            terminal_event: Some(terminal_event.clone()),
+            correlated_events: vec![
+                SafeProxyEventSummary {
+                    conn_id: 11,
+                    client_port: 54321,
+                    phase: "Accepted".to_string(),
+                    io_result: None,
+                    termination_reason: None,
+                    http_response_attempted: None,
+                    http_response_write_succeeded: None,
+                },
+                terminal_event,
+            ],
+            total_captured_events: 42,
+            observer_ring_capacity: 2000,
+            observer_dropped_events: 0,
+        };
+
+        let diag_with_p = PilotFailureDiagnostic {
+            target_n: 100,
+            failed_request_index: 11,
+            validated_requests_count: 10,
+            phase: DiagnosticPhase::ValidateResponse,
+            io_result_type: "EOF_ZERO_BYTES".to_string(),
+            error_kind: None,
+            os_error_code: None,
+            bytes_received_len: 0,
+            error_message: "EOF received".to_string(),
+            store_transaction_count: 10,
+            store_summary: vec![],
+            proxy_diagnostics: Some(pdiag),
+            elapsed_since_start_ms: 500,
+            remaining_budget_ms: Some(14500),
+            stop_signal_sent: true,
+            sockets_released: true,
+        };
+
+        let json_with_p = format_failure_diagnostic_json(&diag_with_p);
+        assert!(json_with_p.contains("\"proxy_diagnostics\": {"));
+        assert!(json_with_p.contains("\"correlation_status\": \"COMPLETE\""));
+        assert!(json_with_p.contains("\"client_ephemeral_port\": 54321"));
+        assert!(json_with_p.contains("\"correlated_conn_id\": 11"));
+        assert!(json_with_p.contains("\"correlated_termination_reason\": \"NormalClosure\""));
+        assert!(json_with_p.contains("\"correlated_phase\": \"UpstreamReadHeader\""));
+        assert!(json_with_p.contains("\"correlated_io_result\": \"OkZero\""));
+        assert!(json_with_p.contains("\"terminal_event\": {"));
+        assert!(json_with_p.contains("\"total_captured_events\": 42"));
+        assert!(json_with_p.contains("\"observer_ring_capacity\": 2000"));
+        assert!(json_with_p.contains("\"observer_dropped_events\": 0"));
+
+        let summary = format_failure_diagnostic_summary(&diag_with_p);
+        assert!(summary.contains("PROXY DIAGNOSTICS (Correlated by Client Ephemeral Port)"));
+        assert!(summary.contains("Correlation Status: COMPLETE"));
+        assert!(summary.contains("Terminal Event: [conn:11] phase=UpstreamReadHeader"));
+        assert!(summary.contains("Client Port: 54321"));
+        assert!(summary.contains("Proxy Conn ID: 11"));
+        assert!(summary.contains("Proxy Phase: UpstreamReadHeader"));
+        assert!(summary.contains("Proxy Termination Reason: NormalClosure"));
+        assert!(summary.contains("Proxy I/O Result: OkZero"));
+    }
+
+    #[test]
+    fn test_proxy_diagnostic_ring_capacity_and_port_correlation() {
+        use kaska_http::proxy::{
+            IoOperationResult, ProxyDiagnosticEvent, ProxyDiagnosticPhase, ProxyTerminationReason,
+        };
+        let observer = BoundedProxyObserver::new(3);
+
+        // Push 4 events across 2 different client ports
+        observer.record(ProxyDiagnosticEvent {
+            conn_id: 1,
+            client_port: 10001,
+            phase: ProxyDiagnosticPhase::Accepted,
+            io_result: None,
+            termination_reason: None,
+            http_response_attempted: None,
+            http_response_write_succeeded: None,
+        });
+        observer.record(ProxyDiagnosticEvent {
+            conn_id: 1,
+            client_port: 10001,
+            phase: ProxyDiagnosticPhase::Completed,
+            io_result: None,
+            termination_reason: Some(ProxyTerminationReason::CompletedSuccessfully),
+            http_response_attempted: None,
+            http_response_write_succeeded: None,
+        });
+        observer.record(ProxyDiagnosticEvent {
+            conn_id: 2,
+            client_port: 10002,
+            phase: ProxyDiagnosticPhase::Accepted,
+            io_result: None,
+            termination_reason: None,
+            http_response_attempted: None,
+            http_response_write_succeeded: None,
+        });
+        observer.record(ProxyDiagnosticEvent {
+            conn_id: 2,
+            client_port: 10002,
+            phase: ProxyDiagnosticPhase::UpstreamConnected,
+            io_result: Some(IoOperationResult::Err {
+                kind: std::io::ErrorKind::ConnectionRefused,
+                os_code: Some(10061),
+            }),
+            termination_reason: Some(ProxyTerminationReason::UpstreamConnectFailed),
+            http_response_attempted: None,
+            http_response_write_succeeded: None,
+        });
+
+        assert_eq!(observer.capacity(), 3);
+        assert_eq!(observer.total_captured(), 4);
+        assert_eq!(observer.dropped_count(), 1);
+
+        let snap = observer.snapshot();
+        assert_eq!(snap.len(), 3);
+        // Events 1 and 2 belong to port 10001, event 3 belongs to port 10002.
+        // Event 4 exceeded capacity (3) and was dropped.
+        let port_10001_events: Vec<_> = snap.iter().filter(|e| e.client_port == 10001).collect();
+        assert_eq!(port_10001_events.len(), 2);
+        assert_eq!(port_10001_events[0].phase, ProxyDiagnosticPhase::Accepted);
+        assert_eq!(port_10001_events[1].phase, ProxyDiagnosticPhase::Completed);
+
+        let port_10002_events: Vec<_> = snap.iter().filter(|e| e.client_port == 10002).collect();
+        assert_eq!(port_10002_events.len(), 1);
+        assert_eq!(port_10002_events[0].phase, ProxyDiagnosticPhase::Accepted);
+    }
+
+    #[test]
+    fn test_gate6_scenario1_ok_then_err_correlation() {
+        use kaska_http::proxy::{
+            IoOperationResult, ProxyDiagnosticEvent, ProxyDiagnosticPhase, ProxyTerminationReason,
+        };
+        let events = vec![
+            ProxyDiagnosticEvent {
+                conn_id: 1,
+                client_port: 30001,
+                phase: ProxyDiagnosticPhase::ClientHeadersRead,
+                io_result: Some(IoOperationResult::Ok(42)),
+                termination_reason: None,
+                http_response_attempted: None,
+                http_response_write_succeeded: None,
+            },
+            ProxyDiagnosticEvent {
+                conn_id: 1,
+                client_port: 30001,
+                phase: ProxyDiagnosticPhase::UpstreamConnected,
+                io_result: Some(IoOperationResult::Err {
+                    kind: std::io::ErrorKind::ConnectionRefused,
+                    os_code: Some(10061),
+                }),
+                termination_reason: Some(ProxyTerminationReason::UpstreamConnectFailed),
+                http_response_attempted: None,
+                http_response_write_succeeded: None,
+            },
+        ];
+
+        let diag = correlate_proxy_diagnostics(Some(30001), &events, 2, 100, 0);
+        assert_eq!(diag.correlation_status, CorrelationStatus::Complete);
+        assert_eq!(diag.correlated_conn_id, Some(1));
+        assert_eq!(
+            diag.correlated_termination_reason.as_deref(),
+            Some("UpstreamConnectFailed")
+        );
+        assert_eq!(diag.correlated_phase.as_deref(), Some("UpstreamConnected"));
+        assert!(diag
+            .correlated_io_result
+            .unwrap()
+            .contains("ConnectionRefused"));
+        assert!(diag.terminal_event.is_some());
+    }
+
+    #[test]
+    fn test_gate6_scenario2_intermediate_error_recovered_not_early_return() {
+        use kaska_http::proxy::{
+            IoOperationResult, ProxyDiagnosticEvent, ProxyDiagnosticPhase, ProxyTerminationReason,
+        };
+        let events = vec![
+            ProxyDiagnosticEvent {
+                conn_id: 2,
+                client_port: 30002,
+                phase: ProxyDiagnosticPhase::ClientBodyRead,
+                io_result: Some(IoOperationResult::Ok(0)),
+                termination_reason: None,
+                http_response_attempted: None,
+                http_response_write_succeeded: None,
+            },
+            ProxyDiagnosticEvent {
+                conn_id: 2,
+                client_port: 30002,
+                phase: ProxyDiagnosticPhase::Completed,
+                io_result: None,
+                termination_reason: Some(ProxyTerminationReason::CompletedSuccessfully),
+                http_response_attempted: None,
+                http_response_write_succeeded: None,
+            },
+        ];
+
+        let diag = correlate_proxy_diagnostics(Some(30002), &events, 2, 100, 0);
+        assert_eq!(diag.correlation_status, CorrelationStatus::Complete);
+        assert_eq!(
+            diag.correlated_termination_reason.as_deref(),
+            Some("CompletedSuccessfully")
+        );
+        assert_eq!(diag.correlated_phase.as_deref(), Some("Completed"));
+    }
+
+    #[test]
+    fn test_gate6_scenario3_incomplete_connection() {
+        use kaska_http::proxy::{IoOperationResult, ProxyDiagnosticEvent, ProxyDiagnosticPhase};
+        let events = vec![
+            ProxyDiagnosticEvent {
+                conn_id: 3,
+                client_port: 30003,
+                phase: ProxyDiagnosticPhase::Accepted,
+                io_result: None,
+                termination_reason: None,
+                http_response_attempted: None,
+                http_response_write_succeeded: None,
+            },
+            ProxyDiagnosticEvent {
+                conn_id: 3,
+                client_port: 30003,
+                phase: ProxyDiagnosticPhase::ClientHeadersRead,
+                io_result: Some(IoOperationResult::Ok(50)),
+                termination_reason: None,
+                http_response_attempted: None,
+                http_response_write_succeeded: None,
+            },
+        ];
+
+        let diag = correlate_proxy_diagnostics(Some(30003), &events, 2, 100, 0);
+        assert_eq!(diag.correlation_status, CorrelationStatus::Incomplete);
+        assert_eq!(diag.correlated_conn_id, Some(3));
+        assert_eq!(diag.correlated_termination_reason, None);
+        assert_eq!(diag.correlated_phase.as_deref(), Some("ClientHeadersRead"));
+        assert!(diag.terminal_event.is_none());
+    }
+
+    #[test]
+    fn test_gate6_scenario4_not_found() {
+        let events = vec![];
+        let diag = correlate_proxy_diagnostics(Some(30004), &events, 0, 100, 0);
+        assert_eq!(diag.correlation_status, CorrelationStatus::NotFound);
+        assert_eq!(diag.correlated_conn_id, None);
+        assert_eq!(diag.correlated_termination_reason, None);
+        assert!(diag.terminal_event.is_none());
+        assert!(diag.correlated_events.is_empty());
+    }
+
+    #[test]
+    fn test_gate6_scenario5_ambiguous_multiple_conn_ids() {
+        use kaska_http::proxy::{ProxyDiagnosticEvent, ProxyDiagnosticPhase};
+        let events = vec![
+            ProxyDiagnosticEvent {
+                conn_id: 10,
+                client_port: 30005,
+                phase: ProxyDiagnosticPhase::Accepted,
+                io_result: None,
+                termination_reason: None,
+                http_response_attempted: None,
+                http_response_write_succeeded: None,
+            },
+            ProxyDiagnosticEvent {
+                conn_id: 11,
+                client_port: 30005,
+                phase: ProxyDiagnosticPhase::Accepted,
+                io_result: None,
+                termination_reason: None,
+                http_response_attempted: None,
+                http_response_write_succeeded: None,
+            },
+        ];
+
+        let diag = correlate_proxy_diagnostics(Some(30005), &events, 2, 100, 0);
+        assert_eq!(diag.correlation_status, CorrelationStatus::Ambiguous);
+        assert_eq!(diag.correlated_conn_id, None);
+        assert_eq!(diag.correlated_termination_reason, None);
+        assert_eq!(diag.correlated_events.len(), 2);
+        assert!(diag.terminal_event.is_none());
+    }
+
+    #[test]
+    fn test_gate6_scenario6_degraded_dropped_events() {
+        use kaska_http::proxy::{
+            ProxyDiagnosticEvent, ProxyDiagnosticPhase, ProxyTerminationReason,
+        };
+        let events = vec![ProxyDiagnosticEvent {
+            conn_id: 6,
+            client_port: 30006,
+            phase: ProxyDiagnosticPhase::Completed,
+            io_result: None,
+            termination_reason: Some(ProxyTerminationReason::CompletedSuccessfully),
+            http_response_attempted: None,
+            http_response_write_succeeded: None,
+        }];
+
+        // Even though matching terminal event exists, dropped_events > 0 degrades status
+        let diag = correlate_proxy_diagnostics(Some(30006), &events, 10, 100, 5);
+        assert_eq!(diag.correlation_status, CorrelationStatus::Degraded);
+        assert_eq!(diag.observer_dropped_events, 5);
+        assert_eq!(
+            diag.correlated_termination_reason.as_deref(),
+            Some("CompletedSuccessfully")
+        );
+
+        // If port not found and dropped_events > 0, also Degraded
+        let diag_nf = correlate_proxy_diagnostics(Some(39999), &events, 10, 100, 5);
+        assert_eq!(diag_nf.correlation_status, CorrelationStatus::Degraded);
+    }
+
+    #[test]
+    fn test_gate6_scenario7_json_parity_with_and_without_terminal_event() {
+        let diag_with_term = ProxyFailureDiagnostic {
+            correlation_status: CorrelationStatus::Complete,
+            client_ephemeral_port: Some(40007),
+            correlated_conn_id: Some(7),
+            correlated_termination_reason: Some("NormalClosure".to_string()),
+            correlated_phase: Some("EarlyReturn".to_string()),
+            correlated_io_result: Some("OkZero".to_string()),
+            terminal_event: Some(SafeProxyEventSummary {
+                conn_id: 7,
+                client_port: 40007,
+                phase: "EarlyReturn".to_string(),
+                io_result: Some("OkZero".to_string()),
+                termination_reason: Some("NormalClosure".to_string()),
+                http_response_attempted: None,
+                http_response_write_succeeded: None,
+            }),
+            correlated_events: vec![],
+            total_captured_events: 5,
+            observer_ring_capacity: 100,
+            observer_dropped_events: 0,
+        };
+
+        let pilot_diag_term = PilotFailureDiagnostic {
+            target_n: 100,
+            failed_request_index: 7,
+            validated_requests_count: 6,
+            phase: DiagnosticPhase::ValidateResponse,
+            io_result_type: "EOF_ZERO_BYTES".to_string(),
+            error_kind: None,
+            os_error_code: None,
+            bytes_received_len: 0,
+            error_message: "EOF".to_string(),
+            store_transaction_count: 6,
+            store_summary: vec![],
+            proxy_diagnostics: Some(diag_with_term),
+            elapsed_since_start_ms: 100,
+            remaining_budget_ms: Some(10000),
+            stop_signal_sent: true,
+            sockets_released: true,
+        };
+
+        let json_term = format_failure_diagnostic_json(&pilot_diag_term);
+        assert!(json_term.contains("\"correlation_status\": \"COMPLETE\""));
+        assert!(json_term.contains("\"terminal_event\": {"));
+        assert!(json_term.contains("\"conn_id\":7"));
+
+        let mut diag_no_term = pilot_diag_term.clone();
+        if let Some(ref mut p) = diag_no_term.proxy_diagnostics {
+            p.correlation_status = CorrelationStatus::Incomplete;
+            p.terminal_event = None;
+            p.correlated_termination_reason = None;
+        }
+        let json_no_term = format_failure_diagnostic_json(&diag_no_term);
+        assert!(json_no_term.contains("\"correlation_status\": \"INCOMPLETE\""));
+        assert!(json_no_term.contains("\"terminal_event\": null"));
+        assert!(json_no_term.contains("\"correlated_termination_reason\": null"));
+    }
+
+    #[test]
+    fn test_gate6_scenario8_txt_summary_parity_notes() {
+        for (status, expected_note) in [
+            (
+                CorrelationStatus::Degraded,
+                "Buffer capacity reached (Drop Newest policy; new events dropped)",
+            ),
+            (
+                CorrelationStatus::Ambiguous,
+                "Ephemeral port collision detected",
+            ),
+            (
+                CorrelationStatus::Incomplete,
+                "Connection recorded in proxy but terminated abnormally",
+            ),
+            (CorrelationStatus::NotFound, "No proxy events recorded"),
+        ] {
+            let pdiag = ProxyFailureDiagnostic {
+                correlation_status: status,
+                client_ephemeral_port: Some(40008),
+                correlated_conn_id: None,
+                correlated_termination_reason: None,
+                correlated_phase: None,
+                correlated_io_result: None,
+                terminal_event: None,
+                correlated_events: vec![],
+                total_captured_events: 10,
+                observer_ring_capacity: 100,
+                observer_dropped_events: if status == CorrelationStatus::Degraded {
+                    2
+                } else {
+                    0
+                },
+            };
+            let pilot_diag = PilotFailureDiagnostic {
+                target_n: 100,
+                failed_request_index: 8,
+                validated_requests_count: 7,
+                phase: DiagnosticPhase::ValidateResponse,
+                io_result_type: "EOF_ZERO_BYTES".to_string(),
+                error_kind: None,
+                os_error_code: None,
+                bytes_received_len: 0,
+                error_message: "EOF".to_string(),
+                store_transaction_count: 7,
+                store_summary: vec![],
+                proxy_diagnostics: Some(pdiag),
+                elapsed_since_start_ms: 200,
+                remaining_budget_ms: Some(10000),
+                stop_signal_sent: true,
+                sockets_released: true,
+            };
+            let summary = format_failure_diagnostic_summary(&pilot_diag);
+            assert!(summary.contains(&format!("Correlation Status: {}", status.as_str())));
+            assert!(summary.contains(expected_note));
+        }
+    }
+
+    #[test]
+    fn test_gate6_scenario9_terminal_event_selection_multiple_events() {
+        use kaska_http::proxy::{
+            IoOperationResult, ProxyDiagnosticEvent, ProxyDiagnosticPhase, ProxyTerminationReason,
+        };
+        let events = vec![
+            ProxyDiagnosticEvent {
+                conn_id: 9,
+                client_port: 40009,
+                phase: ProxyDiagnosticPhase::ClientHeadersRead,
+                io_result: Some(IoOperationResult::Err {
+                    kind: std::io::ErrorKind::WouldBlock,
+                    os_code: None,
+                }),
+                termination_reason: None,
+                http_response_attempted: None,
+                http_response_write_succeeded: None,
+            },
+            ProxyDiagnosticEvent {
+                conn_id: 9,
+                client_port: 40009,
+                phase: ProxyDiagnosticPhase::UpstreamHeadersWrite,
+                io_result: Some(IoOperationResult::Err {
+                    kind: std::io::ErrorKind::BrokenPipe,
+                    os_code: None,
+                }),
+                termination_reason: None,
+                http_response_attempted: None,
+                http_response_write_succeeded: None,
+            },
+            ProxyDiagnosticEvent {
+                conn_id: 9,
+                client_port: 40009,
+                phase: ProxyDiagnosticPhase::EarlyReturn,
+                io_result: Some(IoOperationResult::Err {
+                    kind: std::io::ErrorKind::BrokenPipe,
+                    os_code: None,
+                }),
+                termination_reason: Some(ProxyTerminationReason::ClientResponseBodyWriteFailed),
+                http_response_attempted: Some(502),
+                http_response_write_succeeded: Some(false),
+            },
+        ];
+
+        let diag = correlate_proxy_diagnostics(Some(40009), &events, 3, 100, 0);
+        assert_eq!(diag.correlation_status, CorrelationStatus::Complete);
+        assert_eq!(
+            diag.correlated_termination_reason.as_deref(),
+            Some("ClientResponseBodyWriteFailed")
+        );
+        let terminal = diag.terminal_event.expect("Terminal event must be present");
+        assert_eq!(terminal.phase, "EarlyReturn");
+        assert_eq!(
+            terminal.termination_reason.as_deref(),
+            Some("ClientResponseBodyWriteFailed")
+        );
+        assert_eq!(terminal.http_response_attempted, Some(502));
+        assert_eq!(terminal.http_response_write_succeeded, Some(false));
+    }
+
+    #[test]
+    fn test_gate6_scenario10_drop_newest_preservation_and_capacity() {
+        use kaska_http::proxy::{ProxyDiagnosticEvent, ProxyDiagnosticPhase};
+        let observer = BoundedProxyObserver::new(20);
+        for i in 1..=50 {
+            observer.record(ProxyDiagnosticEvent {
+                conn_id: i,
+                client_port: 50000 + i as u16,
+                phase: ProxyDiagnosticPhase::Accepted,
+                io_result: None,
+                termination_reason: None,
+                http_response_attempted: None,
+                http_response_write_succeeded: None,
+            });
+        }
+
+        assert_eq!(observer.capacity(), 20);
+        assert_eq!(observer.total_captured(), 50);
+        assert_eq!(observer.dropped_count(), 30);
+        let snap = observer.snapshot();
+        assert_eq!(snap.len(), 20);
+        // Retained elements are the first 20 events (conn_id 1..=20) under Drop-Newest policy
+        assert_eq!(snap.first().unwrap().conn_id, 1);
+        assert_eq!(snap.last().unwrap().conn_id, 20);
+    }
+
+    #[test]
+    fn test_calculate_diagnostic_poll_sleep_bounds() {
+        let poll_interval = Duration::from_millis(5);
+        let max_diag = Duration::from_millis(50);
+        let now = Instant::now();
+
+        // 1. Zero scenario budget remaining -> ZERO
+        let deadline_past = now.checked_sub(Duration::from_millis(10)).unwrap();
+        assert_eq!(
+            calculate_diagnostic_poll_sleep(
+                poll_interval,
+                Duration::from_millis(10),
+                max_diag,
+                now,
+                deadline_past
+            ),
+            Duration::ZERO
+        );
+
+        // 2. Zero diagnostic budget remaining -> ZERO
+        let deadline_future = now + Duration::from_secs(10);
+        assert_eq!(
+            calculate_diagnostic_poll_sleep(
+                poll_interval,
+                Duration::from_millis(50),
+                max_diag,
+                now,
+                deadline_future
+            ),
+            Duration::ZERO
+        );
+
+        // 3. Scenario remaining (2ms) is smaller than poll_interval (5ms) and diag remaining (40ms)
+        let deadline_near = now + Duration::from_millis(2);
+        assert_eq!(
+            calculate_diagnostic_poll_sleep(
+                poll_interval,
+                Duration::from_millis(10),
+                max_diag,
+                now,
+                deadline_near
+            ),
+            Duration::from_millis(2)
+        );
+
+        // 4. Diag remaining (3ms) is smaller than poll_interval (5ms) and scenario remaining (100ms)
+        let deadline_far = now + Duration::from_millis(100);
+        assert_eq!(
+            calculate_diagnostic_poll_sleep(
+                poll_interval,
+                Duration::from_millis(47),
+                max_diag,
+                now,
+                deadline_far
+            ),
+            Duration::from_millis(3)
+        );
+
+        // 5. Normal poll_interval (5ms) is smaller than remaining scenario (100ms) and remaining diag (40ms)
+        assert_eq!(
+            calculate_diagnostic_poll_sleep(
+                poll_interval,
+                Duration::from_millis(10),
+                max_diag,
+                now,
+                deadline_far
+            ),
+            Duration::from_millis(5)
+        );
     }
 }
