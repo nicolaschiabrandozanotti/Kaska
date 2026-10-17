@@ -1568,8 +1568,13 @@ mod tests {
 
     #[test]
     fn test_write_all_err_preserves_error_kind_and_false() {
-        // Simulates write_all failing with specific ErrorKind (e.g. BrokenPipe)
-        let write_err: std::io::Result<()> = Err(std::io::Error::from_raw_os_error(10054));
+        // 1. Simulates write_all failing with a portable ErrorKind (ConnectionReset)
+        let original_error =
+            std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset");
+        let expected_kind = original_error.kind();
+        let expected_os_code = original_error.raw_os_error(); // None for synthetic error
+
+        let write_err: std::io::Result<()> = Err(original_error);
         let succ = write_err.is_ok();
         let io_res = match write_err {
             Ok(_) => IoOperationResult::Ok(100),
@@ -1592,8 +1597,25 @@ mod tests {
         assert_eq!(event.http_response_write_succeeded, Some(false));
         match event.io_result {
             Some(IoOperationResult::Err { kind, os_code }) => {
+                assert_eq!(kind, expected_kind);
                 assert_eq!(kind, std::io::ErrorKind::ConnectionReset);
-                assert_eq!(os_code, Some(10054));
+                assert_eq!(os_code, expected_os_code);
+            }
+            _ => panic!("Expected IoOperationResult::Err"),
+        }
+
+        // 2. Separately verifies raw_os_error preservation without assuming platform-specific mapping
+        let test_os_code = 42;
+        let os_err = std::io::Error::from_raw_os_error(test_os_code);
+        let expected_os_kind = os_err.kind();
+        let io_res_os = IoOperationResult::Err {
+            kind: os_err.kind(),
+            os_code: os_err.raw_os_error(),
+        };
+        match io_res_os {
+            IoOperationResult::Err { kind, os_code } => {
+                assert_eq!(kind, expected_os_kind);
+                assert_eq!(os_code, Some(test_os_code));
             }
             _ => panic!("Expected IoOperationResult::Err"),
         }
