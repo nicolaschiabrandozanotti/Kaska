@@ -603,7 +603,15 @@ impl NativeProxyServer {
                 duration_ms: start_time.elapsed().as_millis() as u64,
                 state: TransactionState::Failed("Host outside authorized scope".to_string()),
             };
-            store.lock().unwrap().insert(tx);
+            let mut store_guard = store.lock().unwrap();
+            let assigned_id = store_guard.insert(tx.clone());
+            drop(store_guard);
+
+            if let Some(cb) = on_transaction {
+                let mut tx_with_id = tx;
+                tx_with_id.id = assigned_id;
+                cb(tx_with_id);
+            }
             return;
         }
 
@@ -641,7 +649,15 @@ impl NativeProxyServer {
                     duration_ms: start_time.elapsed().as_millis() as u64,
                     state: TransactionState::Failed(format!("DNS resolution failed: {}", e)),
                 };
-                store.lock().unwrap().insert(tx);
+                let mut store_guard = store.lock().unwrap();
+                let assigned_id = store_guard.insert(tx.clone());
+                drop(store_guard);
+
+                if let Some(cb) = on_transaction {
+                    let mut tx_with_id = tx;
+                    tx_with_id.id = assigned_id;
+                    cb(tx_with_id);
+                }
                 return;
             }
         };
@@ -682,7 +698,15 @@ impl NativeProxyServer {
                     "Resolved IP outside authorized loopback scope".to_string(),
                 ),
             };
-            store.lock().unwrap().insert(tx);
+            let mut store_guard = store.lock().unwrap();
+            let assigned_id = store_guard.insert(tx.clone());
+            drop(store_guard);
+
+            if let Some(cb) = on_transaction {
+                let mut tx_with_id = tx;
+                tx_with_id.id = assigned_id;
+                cb(tx_with_id);
+            }
             return;
         }
 
@@ -747,7 +771,15 @@ impl NativeProxyServer {
                         last_connect_err
                     )),
                 };
-                store.lock().unwrap().insert(tx);
+                let mut store_guard = store.lock().unwrap();
+                let assigned_id = store_guard.insert(tx.clone());
+                drop(store_guard);
+
+                if let Some(cb) = on_transaction {
+                    let mut tx_with_id = tx;
+                    tx_with_id.id = assigned_id;
+                    cb(tx_with_id);
+                }
                 return;
             }
         };
