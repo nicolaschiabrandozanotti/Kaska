@@ -11,6 +11,8 @@ use std::{
 slint::include_modules!();
 #[path = "../src/controller.rs"]
 pub mod controller;
+#[path = "../src/filter.rs"]
+pub mod filter;
 #[path = "../src/platform.rs"]
 pub mod platform;
 
@@ -93,7 +95,7 @@ fn fixture(count: usize) -> ModelRc<TrafficItem> {
     Rc::new(VecModel::from(
         (0..count)
             .map(|index| TrafficItem {
-                id: index as i32 + 1,
+                id: SharedString::from((index + 1).to_string()),
                 method: SharedString::from(if index == 1 { "POST" } else { "GET" }),
                 host: "127.0.0.1:8989".into(),
                 path: [
@@ -125,6 +127,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.global::<AppTheme>().set_mono_font("Consolas".into());
     app.set_transactions(fixture(4));
     app.set_transactions_count(4);
+    app.set_total_transactions_count(4);
+    app.set_visible_transactions_count(4);
     app.set_selected_transaction_idx(0);
     app.set_active_req_headers(
         "Host: 127.0.0.1:8989\nAccept: application/json\nConnection: close".into(),
@@ -136,12 +140,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let selected = Rc::new(Cell::new(-1));
     let selected_callback = selected.clone();
     app.on_select_transaction(move |index| selected_callback.set(index));
+    let selected_id_cell = Rc::new(RefCell::new(String::new()));
+    let selected_id_cb = selected_id_cell.clone();
+    app.on_select_transaction_by_id(move |id_str| {
+        *selected_id_cb.borrow_mut() = id_str.to_string()
+    });
     let toggles = Rc::new(Cell::new(0));
     let toggle_callback = toggles.clone();
     app.on_toggle_proxy(move || toggle_callback.set(toggle_callback.get() + 1));
     let sends = Rc::new(Cell::new(0));
     let send_callback = sends.clone();
     app.on_send_test_traffic(move || send_callback.set(send_callback.get() + 1));
+    let filter_method_events = Rc::new(Cell::new(-1i32));
+    let fm_clone = filter_method_events.clone();
+    app.on_filter_method_changed(move |idx| fm_clone.set(idx));
+    let filter_reset_events = Rc::new(Cell::new(0usize));
+    let fr_clone = filter_reset_events.clone();
+    app.on_reset_filters(move || fr_clone.set(fr_clone.get() + 1));
     app.show()?;
     resize(app.window(), 1180.0, 680.0);
     let proxy_reservation = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -229,7 +244,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (1920.0, 980.0),
             ];
             if index == 0 && !tick.is_multiple_of(2) {
-                click(app.window(), 230.0, 168.0);
+                // Calculated Row 0 vertical position:
+                // Window Header (68px) + Inspector top padding (12px) + Inspector title bar (32px) + spacing (8px)
+                // + Filter Bar panel (78px) + spacing (8px) + Table Scroll border (2px)
+                // + Table Header (32px) + Row 0 mid-height (16px) = 256.0px.
+                click(app.window(), 230.0, 256.0);
                 assert_eq!(selected.get(), 0, "Row pointer selection");
                 key(app.window(), slint::platform::Key::DownArrow);
                 assert_eq!(
@@ -268,7 +287,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 click(app.window(), 80.0, 82.0);
                 assert_eq!(app.get_active_tab(), 0);
                 app.window().dispatch_event(slint::platform::WindowEvent::PointerExited);
-                println!("PASS: pointer/keyboard selection, 10,000 rows, action callbacks, loading guard, keyboard navigation");
+
+                // Verify filter callbacks and controls are exercised
+                app.invoke_filter_method_changed(1);
+                assert_eq!(filter_method_events.get(), 1, "Filter method changed callback executed");
+                app.invoke_reset_filters();
+                assert_eq!(filter_reset_events.get(), 1, "Reset filters callback executed");
+
+                println!("PASS: pointer/keyboard selection, 10,000 rows, action callbacks, loading guard, keyboard navigation, filter callbacks");
             }
             if index < sizes.len() * 4 {
                 let (width, height) = sizes[index / 4];
@@ -329,7 +355,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     assert!(live_wait.get() < 40, "Timed out waiting for real UI capture");
                     return;
                 }
-                click(app.window(), 230.0, 168.0);
+                // Pointer click on Row 0 at calculated Y = 256.0
+                click(app.window(), 230.0, 256.0);
                 assert_eq!(app.get_selected_transaction_idx(), 0);
                 assert!(!app.get_active_req_headers().is_empty());
                 assert!(!app.get_active_resp_headers().is_empty());

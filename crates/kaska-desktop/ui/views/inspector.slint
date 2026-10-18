@@ -1,4 +1,4 @@
-import { ListView, ScrollView } from "std-widgets.slint";
+import { ListView, ScrollView, ComboBox } from "std-widgets.slint";
 import { AppTheme } from "../styles/theme.slint";
 import { ActionButton } from "../components/action_button.slint";
 import { DocumentPanel, DocumentView } from "../components/document_view.slint";
@@ -12,7 +12,7 @@ component TrafficColumns inherits HorizontalLayout {
     spacing: 8px;
     Text { text: root.heading ? "ID" : root.item.id; width: 44px; color: AppTheme.text-muted; font-size: 12px; vertical-alignment: center; }
     Text { text: root.heading ? "Method" : root.item.method; width: 72px; color: root.heading ? AppTheme.text-muted : AppTheme.text-primary; font-size: 13px; vertical-alignment: center; }
-    Text { text: root.heading ? "Status" : root.item.status-code > 0 ? root.item.status-code : "Pending"; width: 64px; color: AppTheme.text-secondary; font-size: 13px; vertical-alignment: center; Tooltip { text: @markdown("\{root.item.status-text}"); } }
+    Text { text: root.heading ? "Status" : root.item.status-code > 0 ? root.item.status-code : root.item.status-text; width: 64px; color: AppTheme.text-secondary; font-size: 13px; vertical-alignment: center; Tooltip { text: @markdown("\{root.item.status-text}"); } }
     Text { text: root.heading ? "Host" : root.item.host; width: 170px; color: AppTheme.text-secondary; font-size: 13px; overflow: elide; vertical-alignment: center; Tooltip { text: @markdown("\{root.item.host}"); } }
     Text { text: root.heading ? "Path" : root.item.path; min-width: 180px; horizontal-stretch: 1; color: AppTheme.text-primary; font-size: 13px; overflow: elide; vertical-alignment: center; Tooltip { text: @markdown("\{root.item.path}"); } }
     Text { text: root.heading ? "Time" : root.item.duration-ms + " ms"; width: 80px; color: AppTheme.text-secondary; font-size: 13px; vertical-alignment: center; }
@@ -20,10 +20,92 @@ component TrafficColumns inherits HorizontalLayout {
     Text { text: root.heading ? "Type" : root.item.content-type; width: 160px; color: AppTheme.text-secondary; font-size: 13px; overflow: elide; vertical-alignment: center; Tooltip { text: @markdown("\{root.item.content-type}"); } }
 }
 
+
+component FilterToggleCheckbox inherits Rectangle {
+    in property <string> text;
+    in-out property <bool> checked: false;
+    in property <string> description: "";
+    callback toggled(bool);
+    private property <bool> keyboard-pressed;
+    forward-focus: keys;
+    accessible-role: checkbox;
+    accessible-label: root.text;
+    accessible-description: root.description;
+    accessible-checked: root.checked;
+    accessible-action-default => { root.checked = !root.checked; root.toggled(root.checked); }
+    min-height: 24px;
+    preferred-height: 24px;
+    max-height: 24px;
+    min-width: content.min-width + 6px;
+    horizontal-stretch: 0;
+    background: transparent;
+    border-radius: 3px;
+    border-width: keys.has-focus ? 2px : 0px;
+    border-color: AppTheme.border-focus;
+    keys := FocusScope {
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return {
+                root.keyboard-pressed = true;
+                return accept;
+            }
+            return reject;
+        }
+        key-released(event) => {
+            if event.text == " " || event.text == Key.Return {
+                if root.keyboard-pressed {
+                    root.checked = !root.checked;
+                    root.toggled(root.checked);
+                }
+                root.keyboard-pressed = false;
+                return accept;
+            }
+            return reject;
+        }
+        focus-lost(reason) => { root.keyboard-pressed = false; }
+    }
+    pointer := TouchArea {
+        clicked => {
+            keys.focus();
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+    content := HorizontalLayout {
+        padding-left: 4px;
+        padding-right: 4px;
+        spacing: 5px;
+        Rectangle {
+            width: 14px;
+            height: 14px;
+            y: (parent.height - self.height) / 2;
+            background: root.checked ? AppTheme.bg-row-selected : AppTheme.bg-input;
+            border-width: 1px;
+            border-color: root.checked ? AppTheme.text-primary : AppTheme.border-control;
+            border-radius: 2px;
+            if root.checked: Text {
+                text: "✓";
+                color: AppTheme.text-primary;
+                font-size: 10px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        Text {
+            text: root.text;
+            color: root.checked ? AppTheme.text-primary : AppTheme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+    if root.description != "": Tooltip { text: @markdown("\{root.description}"); }
+}
+
 export component NetworkInspectorView inherits Rectangle {
     min-width: 0px;
     min-height: 0px;
     in property <[TrafficItem]> items: [];
+    in property <int> total-count: 0;
+    in property <int> visible-count: 0;
     in-out property <int> selected-index: -1;
     in property <string> active-req-headers;
     in property <string> active-req-body;
@@ -37,8 +119,35 @@ export component NetworkInspectorView inherits Rectangle {
     in-out property <bool> show-response;
     in-out property <bool> show-details;
     in-out property <float> table-ratio: 0.4;
+
+    // Filter bar state
+    in-out property <string> filter-search: "";
+    in-out property <int> filter-method-idx: 0;
+    in-out property <int> filter-status-idx: 0;
+    in-out property <int> filter-outcome-idx: 0;
+    in-out property <bool> filter-only-in-scope: false;
+    in-out property <bool> filter-hide-connect: false;
+    in-out property <bool> filter-hide-failed: false;
+    in-out property <bool> filters-expanded: root.height > 300px;
+
+    private property <[string]> method-options: ["All", "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "Other"];
+    private property <[string]> status-options: ["All", "1xx", "2xx", "3xx", "4xx", "5xx", "No Response"];
+    private property <[string]> outcome-options: ["All", "Pending", "Completed", "Failed"];
+    private property <bool> has-active-filters: root.filter-search != "" || root.filter-method-idx != 0 || root.filter-status-idx != 0 || root.filter-outcome-idx != 0 || root.filter-only-in-scope || root.filter-hide-connect || root.filter-hide-failed;
+
+    // Callbacks to Rust
     callback select-item(int);
+    callback select-transaction-by-id(string);
     callback clear-history();
+    callback filter-search-changed(string);
+    callback filter-method-changed(int);
+    callback filter-status-changed(int);
+    callback filter-outcome-changed(int);
+    callback filter-only-in-scope-changed(bool);
+    callback filter-hide-connect-changed(bool);
+    callback filter-hide-failed-changed(bool);
+    callback reset-filters();
+
     private property <bool> compact: root.width < 800px;
     private property <bool> short: workspace.height < 340px;
     private property <length> table-width: max(1030px, table-scroll.visible-width);
@@ -47,6 +156,7 @@ export component NetworkInspectorView inherits Rectangle {
         if index >= 0 && index < root.items.length {
             root.selected-index = index;
             root.select-item(index);
+            root.select-transaction-by-id(root.items[index].id);
             let row-top = index * 32px;
             if row-top + rows.content-y < 0px { rows.content-y = -row-top; }
             else if row-top + 32px + rows.content-y > rows.visible-height {
@@ -61,9 +171,139 @@ export component NetworkInspectorView inherits Rectangle {
             height: 32px;
             spacing: 8px;
             Text { text: "HTTP traffic"; color: AppTheme.text-primary; font-size: 14px; font-weight: 600; vertical-alignment: center; }
-            Text { text: root.items.length + " requests"; color: AppTheme.text-muted; font-size: 12px; vertical-alignment: center; }
+            if !root.compact: Text {
+                text: "Showing " + root.visible-count + " of " + root.total-count + " requests";
+                color: AppTheme.text-muted;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+            if root.compact: Text {
+                text: root.visible-count + "/" + root.total-count;
+                color: AppTheme.text-muted;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
             Rectangle { horizontal-stretch: 1; }
-            ActionButton { text: "Clear"; icon: @image-url("../assets/icons/trash-2.svg"); enabled: root.items.length > 0; description: "Clear captured traffic history"; clicked => { root.clear-history(); } }
+            ActionButton {
+                text: root.filters-expanded ? "Hide filters" : (root.has-active-filters ? "Filters *" : "Filters");
+                selected: root.filters-expanded;
+                description: root.filters-expanded ? "Collapse filter controls" : "Expand filter controls";
+                clicked => { root.filters-expanded = !root.filters-expanded; }
+            }
+            ActionButton {
+                text: "Reset";
+                enabled: true;
+                description: "Reset all filter criteria to default neutral state";
+                clicked => { root.reset-filters(); }
+            }
+            ActionButton {
+                text: "Clear";
+                icon: @image-url("../assets/icons/trash-2.svg");
+                enabled: root.total-count > 0;
+                description: "Clear captured traffic history";
+                clicked => { root.clear-history(); }
+            }
+        }
+        // Filter Bar Panel
+        if root.filters-expanded: Rectangle {
+            background: AppTheme.bg-card;
+            border-color: AppTheme.border-subtle;
+            border-width: 1px;
+            border-radius: 4px;
+            height: 78px;
+            VerticalLayout {
+                padding: 6px;
+                spacing: 6px;
+                // Line 1: Search input + Scope & Exclusion Toggles
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: center;
+                    height: 28px;
+                    // Search box
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        min-width: 120px;
+                        height: 28px;
+                        background: AppTheme.bg-input;
+                        border-color: search-input.has-focus ? AppTheme.border-focus : AppTheme.border-subtle;
+                        border-width: search-input.has-focus ? 2px : 1px;
+                        border-radius: 4px;
+                        search-input := TextInput {
+                            x: 8px;
+                            width: parent.width - 16px;
+                            y: (parent.height - self.height) / 2;
+                            text <=> root.filter-search;
+                            single-line: true;
+                            font-size: 12px;
+                            color: AppTheme.text-primary;
+                            accessible-label: "Search host or path";
+                            edited => { root.filter-search-changed(self.text); }
+                        }
+                        if root.filter-search == "": Text {
+                            x: 8px;
+                            y: (parent.height - self.height) / 2;
+                            text: "Search host/path...";
+                            font-size: 12px;
+                            color: AppTheme.text-disabled;
+                        }
+                    }
+                    // Toggles
+                    FilterToggleCheckbox {
+                        text: "In scope";
+                        checked <=> root.filter-only-in-scope;
+                        description: "Filter to show only in-scope target hosts";
+                        toggled(val) => { root.filter-only-in-scope-changed(val); }
+                    }
+                    FilterToggleCheckbox {
+                        text: "Hide CONNECT";
+                        checked <=> root.filter-hide-connect;
+                        description: "Hide tunnel CONNECT requests";
+                        toggled(val) => { root.filter-hide-connect-changed(val); }
+                    }
+                    FilterToggleCheckbox {
+                        text: "Hide failed";
+                        checked <=> root.filter-hide-failed;
+                        description: "Hide failed transactions (completed 4xx/5xx remain visible)";
+                        toggled(val) => { root.filter-hide-failed-changed(val); }
+                    }
+                }
+                // Line 2: ComboBox Selectors (Method, Status, Outcome)
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: start;
+                    height: 32px;
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Text { text: "Method:"; font-size: 11px; color: AppTheme.text-muted; vertical-alignment: center; }
+                        ComboBox {
+                            width: 95px;
+                            model: root.method-options;
+                            current-index <=> root.filter-method-idx;
+                            selected(val) => { root.filter-method-changed(self.current-index); }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Text { text: "Status:"; font-size: 11px; color: AppTheme.text-muted; vertical-alignment: center; }
+                        ComboBox {
+                            width: 105px;
+                            model: root.status-options;
+                            current-index <=> root.filter-status-idx;
+                            selected(val) => { root.filter-status-changed(self.current-index); }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Text { text: "Outcome:"; font-size: 11px; color: AppTheme.text-muted; vertical-alignment: center; }
+                        ComboBox {
+                            width: 105px;
+                            model: root.outcome-options;
+                            current-index <=> root.filter-outcome-idx;
+                            selected(val) => { root.filter-outcome-changed(self.current-index); }
+                        }
+                    }
+                }
+            }
         }
         workspace := Rectangle {
             background: transparent;
