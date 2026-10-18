@@ -42,8 +42,10 @@ export component AppWindow inherits Window {
     in property <bool> proxy-running: true;
     in property <bool> is-sending-test: false;
 
-    // Traffic data
+    // Traffic data & counts
     in property <[TrafficItem]> transactions: [];
+    in property <int> total-transactions-count: 0;
+    in property <int> visible-transactions-count: 0;
     in-out property <int> selected-transaction-idx: -1;
     in property <string> active-req-headers: "";
     in property <string> active-req-body: "";
@@ -55,6 +57,15 @@ export component AppWindow inherits Window {
     in property <string> status-message: "Proxy listening on 127.0.0.1:8080";
     in property <string> os-info: "Windows x86_64";
     in property <int> transactions-count: 0;
+
+    // Filter bar state
+    in-out property <string> filter-search: "";
+    in-out property <int> filter-method-idx: 0;
+    in-out property <int> filter-status-idx: 0;
+    in-out property <int> filter-outcome-idx: 0;
+    in-out property <bool> filter-only-in-scope: false;
+    in-out property <bool> filter-hide-connect: false;
+    in-out property <bool> filter-hide-failed: false;
 
     // Repeater state & inputs
     in-out property <string> repeater-method: "GET";
@@ -78,7 +89,16 @@ export component AppWindow inherits Window {
     callback toggle-proxy();
     callback send-test-traffic();
     callback select-transaction(int);
+    callback select-transaction-by-id(string);
     callback clear-history();
+    callback filter-search-changed(string);
+    callback filter-method-changed(int);
+    callback filter-status-changed(int);
+    callback filter-outcome-changed(int);
+    callback filter-only-in-scope-changed(bool);
+    callback filter-hide-connect-changed(bool);
+    callback filter-hide-failed-changed(bool);
+    callback reset-filters();
     callback send-repeater();
     callback cancel-repeater();
     callback reset-repeater-defaults();
@@ -136,14 +156,32 @@ export component AppWindow inherits Window {
                         show-details <=> root.show-details;
                         table-ratio <=> root.table-ratio;
                         items: root.transactions;
+                        total-count: root.total-transactions-count;
+                        visible-count: root.visible-transactions-count;
                         selected-index <=> root.selected-transaction-idx;
                         active-req-headers: root.active-req-headers;
                         active-req-body: root.active-req-body;
                         active-resp-headers: root.active-resp-headers;
                         active-resp-body: root.active-resp-body;
                         active-timing-text: root.active-timing-text;
+                        filter-search <=> root.filter-search;
+                        filter-method-idx <=> root.filter-method-idx;
+                        filter-status-idx <=> root.filter-status-idx;
+                        filter-outcome-idx <=> root.filter-outcome-idx;
+                        filter-only-in-scope <=> root.filter-only-in-scope;
+                        filter-hide-connect <=> root.filter-hide-connect;
+                        filter-hide-failed <=> root.filter-hide-failed;
                         select-item(idx) => { root.select-transaction(idx); }
+                        select-transaction-by-id(id) => { root.select-transaction-by-id(id); }
                         clear-history => { root.clear-history(); }
+                        filter-search-changed(val) => { root.filter-search-changed(val); }
+                        filter-method-changed(val) => { root.filter-method-changed(val); }
+                        filter-status-changed(val) => { root.filter-status-changed(val); }
+                        filter-outcome-changed(val) => { root.filter-outcome-changed(val); }
+                        filter-only-in-scope-changed(val) => { root.filter-only-in-scope-changed(val); }
+                        filter-hide-connect-changed(val) => { root.filter-hide-connect-changed(val); }
+                        filter-hide-failed-changed(val) => { root.filter-hide-failed-changed(val); }
+                        reset-filters => { root.reset-filters(); }
                     }
 
                     if root.active-tab == 1: RepeaterView {

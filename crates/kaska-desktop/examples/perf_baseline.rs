@@ -27,6 +27,8 @@ slint::include_modules!();
 
 #[path = "../src/controller.rs"]
 pub mod controller;
+#[path = "../src/filter.rs"]
+pub mod filter;
 #[path = "../src/platform.rs"]
 pub mod platform;
 
@@ -1097,7 +1099,7 @@ pub fn run_prf01_microbenchmark(n: usize, iterations: usize) -> ModuleResult {
         let items: Vec<TrafficItem> = all_txs
             .into_iter()
             .map(|t| TrafficItem {
-                id: t.id as i32,
+                id: SharedString::from(t.id.to_string()),
                 method: SharedString::from(t.request.method.to_string()),
                 host: SharedString::from(t.request.host.clone()),
                 path: SharedString::from(t.request.path.clone()),
@@ -1128,7 +1130,7 @@ pub fn run_prf01_microbenchmark(n: usize, iterations: usize) -> ModuleResult {
         let items: Vec<TrafficItem> = all_txs
             .into_iter()
             .map(|t| TrafficItem {
-                id: t.id as i32,
+                id: SharedString::from(t.id.to_string()),
                 method: SharedString::from(t.request.method.to_string()),
                 host: SharedString::from(t.request.host.clone()),
                 path: SharedString::from(t.request.path.clone()),

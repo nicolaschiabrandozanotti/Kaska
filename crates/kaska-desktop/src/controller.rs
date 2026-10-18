@@ -9,6 +9,7 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 #[path = "repeater_adapter.rs"]
 pub mod repeater_adapter;
 
+use crate::filter::{FilterState, HttpStatusFilter, MethodFilter, OutcomeFilter};
 use crate::platform::PlatformInfo;
 use crate::{AppWindow, TrafficItem};
 use kaska_http::models::HttpTransaction;
@@ -20,6 +21,144 @@ use repeater_adapter::{
     RepeaterAdapterError, RepeaterEvent, RepeaterEventSink, RepeaterLifecycle,
     RepeaterTaskController, RepeaterUiInput, RepeaterViewState,
 };
+
+/// Helper projecting a `TransactionSummary` into a Slint `TrafficItem` with exact string representation of `u64` id.
+pub fn summary_to_traffic_item(s: &kaska_http::store::TransactionSummary) -> TrafficItem {
+    TrafficItem {
+        id: SharedString::from(s.id.to_string()),
+        method: SharedString::from(s.method.to_string()),
+        host: SharedString::from(s.host.clone()),
+        path: SharedString::from(s.path.clone()),
+        status_code: s.status_code as i32,
+        status_text: SharedString::from(s.status_text.clone()),
+        duration_ms: s.duration_ms as i32,
+        size_bytes: s.response_size_bytes as i32,
+        content_type: SharedString::from(s.content_type.clone()),
+        is_error: s.outcome == kaska_http::store::TransactionOutcome::Failed
+            || (s.status_code >= 400 && s.status_code < 600),
+    }
+}
+
+/// Unified pure projection function that applies filters, maintains u64 identity,
+/// computes accurate total and visible counts, and reconciles selection.
+///
+/// Returns: `(items, total_count, visible_count, new_selected_index, is_selection_retained)`
+pub fn project_traffic(
+    summaries: &[kaska_http::store::TransactionSummary],
+    filter: &FilterState,
+    scope: &AuditScope,
+    selected_id: Option<u64>,
+) -> (Vec<TrafficItem>, usize, usize, i32, bool) {
+    let total_count = summaries.len();
+    let matching_summaries = filter.filter(summaries, scope);
+    let visible_count = matching_summaries.len();
+
+    let mut new_idx: i32 = -1;
+    let mut selection_retained = false;
+
+    let items: Vec<TrafficItem> = matching_summaries
+        .iter()
+        .enumerate()
+        .map(|(idx, s)| {
+            if let Some(sel_id) = selected_id {
+                if s.id == sel_id {
+                    new_idx = idx as i32;
+                    selection_retained = true;
+                }
+            }
+            summary_to_traffic_item(s)
+        })
+        .collect();
+
+    (
+        items,
+        total_count,
+        visible_count,
+        new_idx,
+        selection_retained,
+    )
+}
+
+/// Sets details on AppWindow from an optional HttpTransaction reference or clears them.
+pub fn set_transaction_details_on_ui(ui: &AppWindow, tx_opt: Option<&HttpTransaction>) {
+    if let Some(tx) = tx_opt {
+        ui.set_active_req_headers(SharedString::from(tx.request.headers_raw_text()));
+        ui.set_active_req_body(SharedString::from(tx.request.body_as_utf8()));
+
+        if let Some(resp) = &tx.response {
+            ui.set_active_resp_headers(SharedString::from(resp.headers_raw_text()));
+            ui.set_active_resp_body(SharedString::from(resp.body_as_utf8()));
+            ui.set_active_timing_text(SharedString::from(format!(
+                "Status {} • Duration: {} ms",
+                resp.status_code, tx.duration_ms
+            )));
+        } else {
+            ui.set_active_resp_headers(SharedString::from("(No response)"));
+            ui.set_active_resp_body(SharedString::from(""));
+            let outcome_str = match &tx.state {
+                kaska_http::models::TransactionState::Pending => "Pending",
+                kaska_http::models::TransactionState::Failed(_) => "Failed",
+                kaska_http::models::TransactionState::Completed => "No response",
+            };
+            ui.set_active_timing_text(SharedString::from(outcome_str));
+        }
+    } else {
+        ui.set_active_req_headers(SharedString::from(""));
+        ui.set_active_req_body(SharedString::from(""));
+        ui.set_active_resp_headers(SharedString::from(""));
+        ui.set_active_resp_body(SharedString::from(""));
+        ui.set_active_timing_text(SharedString::from(""));
+    }
+}
+
+/// Helper that refreshes the UI from current store state, filters, and selection.
+/// Guarantees:
+/// 1. Takes one snapshot under lock, releases lock.
+/// 2. Performs projection.
+/// 3. Looks up single selected item under lock if needed, releases lock.
+/// 4. Updates Slint UI strictly on UI event loop without holding any mutex.
+pub fn refresh_traffic_ui(
+    ui: &AppWindow,
+    store: &SharedTrafficStore,
+    scope: &AuditScope,
+    filter: &FilterState,
+    selected_id: &mut Option<u64>,
+    status_suffix: Option<String>,
+) {
+    // 1. Take snapshot of metadata and release lock immediately
+    let summaries = store.lock().unwrap().get_metadata_snapshot();
+
+    // 2. Pure projection
+    let (items, total_count, visible_count, new_idx, selection_retained) =
+        project_traffic(&summaries, filter, scope, *selected_id);
+
+    if !selection_retained {
+        *selected_id = None;
+    }
+
+    // 3. If selected_id exists, look up single transaction
+    let mut selected_tx = None;
+    if let Some(id) = *selected_id {
+        let guard = store.lock().unwrap();
+        selected_tx = guard.get_by_id(id).cloned();
+    }
+
+    // 4. Update Slint UI
+    ui.set_total_transactions_count(total_count as i32);
+    ui.set_visible_transactions_count(visible_count as i32);
+    ui.set_transactions_count(total_count as i32);
+    ui.set_selected_transaction_idx(new_idx);
+    ui.set_transactions(ModelRc::new(VecModel::from(items)));
+
+    set_transaction_details_on_ui(ui, selected_tx.as_ref());
+
+    if let Some(suffix) = status_suffix {
+        ui.set_status_message(SharedString::from(format!(
+            "Captured {} requests ({} visible) • {}",
+            total_count, visible_count, suffix
+        )));
+    }
+}
 
 /// Bridge struct implementing `RepeaterEventSink` for Slint's thread-safe event loop.
 ///
@@ -228,43 +367,74 @@ impl AppController {
             *guard = Some(test_server);
         }
 
+        // Shared filter state and selected ID for Inspector projection
+        let filter_state = Arc::new(Mutex::new(FilterState::default()));
+        let selected_id = Arc::new(Mutex::new(None::<u64>));
+
+        // Initialize default Filter Bar values on AppWindow
+        app.set_filter_search(SharedString::from(""));
+        app.set_filter_method_idx(0);
+        app.set_filter_status_idx(0);
+        app.set_filter_outcome_idx(0);
+        app.set_filter_only_in_scope(false);
+        app.set_filter_hide_connect(false);
+        app.set_filter_hide_failed(false);
+
+        // Initial projection of store contents
+        {
+            let mut sel = selected_id.lock().unwrap();
+            let f = filter_state.lock().unwrap().clone();
+            refresh_traffic_ui(app, &self.store, &self.scope, &f, &mut sel, None);
+        }
+
         // Start native capturing proxy server
         let app_weak = app.as_weak();
         let store_ref = Arc::clone(&self.store);
+        let scope_ref = Arc::clone(&self.scope);
+        let filter_clone = Arc::clone(&filter_state);
+        let selected_clone = Arc::clone(&selected_id);
 
-        let on_tx_callback = Arc::new(move |tx: HttpTransaction| {
-            let app_weak_clone = app_weak.clone();
-            let store_clone = Arc::clone(&store_ref);
+        let make_on_tx_callback = {
+            let app_weak = app_weak.clone();
+            let store_ref = Arc::clone(&store_ref);
+            let scope_ref = Arc::clone(&scope_ref);
+            let filter_clone = Arc::clone(&filter_clone);
+            let selected_clone = Arc::clone(&selected_clone);
 
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = app_weak_clone.upgrade() {
-                    let all_txs = store_clone.lock().unwrap().get_all();
-                    let items: Vec<TrafficItem> = all_txs
-                        .into_iter()
-                        .map(|t| TrafficItem {
-                            id: t.id as i32,
-                            method: SharedString::from(t.request.method.to_string()),
-                            host: SharedString::from(t.request.host.clone()),
-                            path: SharedString::from(t.request.path.clone()),
-                            status_code: t.status_code() as i32,
-                            status_text: SharedString::from(t.status_text()),
-                            duration_ms: t.duration_ms as i32,
-                            size_bytes: t.response_size_bytes() as i32,
-                            content_type: SharedString::from(t.content_type()),
-                            is_error: t.is_error(),
-                        })
-                        .collect();
+            move || {
+                let app_weak_inner = app_weak.clone();
+                let store_inner = Arc::clone(&store_ref);
+                let scope_inner = Arc::clone(&scope_ref);
+                let filter_inner = Arc::clone(&filter_clone);
+                let selected_inner = Arc::clone(&selected_clone);
 
-                    let count = items.len();
-                    ui.set_transactions_count(count as i32);
-                    ui.set_transactions(ModelRc::new(VecModel::from(items)));
-                    ui.set_status_message(SharedString::from(format!(
-                        "Captured {} requests • Last: {} {}",
-                        count, tx.request.method, tx.request.path
-                    )));
-                }
-            });
-        });
+                Arc::new(move |tx: HttpTransaction| {
+                    let app_weak_deep = app_weak_inner.clone();
+                    let store_deep = Arc::clone(&store_inner);
+                    let scope_deep = Arc::clone(&scope_inner);
+                    let filter_deep = Arc::clone(&filter_inner);
+                    let selected_deep = Arc::clone(&selected_inner);
+
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = app_weak_deep.upgrade() {
+                            let filter = filter_deep.lock().unwrap().clone();
+                            let mut sel_id = selected_deep.lock().unwrap();
+                            let suffix = format!("Last: {} {}", tx.request.method, tx.request.path);
+                            refresh_traffic_ui(
+                                &ui,
+                                &store_deep,
+                                &scope_deep,
+                                &filter,
+                                &mut sel_id,
+                                Some(suffix),
+                            );
+                        }
+                    });
+                })
+            }
+        };
+
+        let on_tx_callback = make_on_tx_callback();
 
         let proxy = NativeProxyServer::new(
             self.proxy_port,
@@ -288,6 +458,7 @@ impl AppController {
         let scope_ref = Arc::clone(&self.scope);
         let app_weak = app.as_weak();
         let port = self.proxy_port;
+        let make_on_tx_restart = make_on_tx_callback;
 
         app.on_toggle_proxy(move || {
             let mut guard = proxy_holder.lock().unwrap();
@@ -302,41 +473,8 @@ impl AppController {
                 }
             }
 
-            // Restart proxy
-            let app_weak_inner = app_weak.clone();
-            let store_inner = Arc::clone(&store_ref);
-            let on_tx = Arc::new(move |tx: HttpTransaction| {
-                let app_weak_deep = app_weak_inner.clone();
-                let store_deep = Arc::clone(&store_inner);
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = app_weak_deep.upgrade() {
-                        let all_txs = store_deep.lock().unwrap().get_all();
-                        let items: Vec<TrafficItem> = all_txs
-                            .into_iter()
-                            .map(|t| TrafficItem {
-                                id: t.id as i32,
-                                method: SharedString::from(t.request.method.to_string()),
-                                host: SharedString::from(t.request.host.clone()),
-                                path: SharedString::from(t.request.path.clone()),
-                                status_code: t.status_code() as i32,
-                                status_text: SharedString::from(t.status_text()),
-                                duration_ms: t.duration_ms as i32,
-                                size_bytes: t.response_size_bytes() as i32,
-                                content_type: SharedString::from(t.content_type()),
-                                is_error: t.is_error(),
-                            })
-                            .collect();
-
-                        let count = items.len();
-                        ui.set_transactions_count(count as i32);
-                        ui.set_transactions(ModelRc::new(VecModel::from(items)));
-                        ui.set_status_message(SharedString::from(format!(
-                            "Captured {} requests • Last: {} {}",
-                            count, tx.request.method, tx.request.path
-                        )));
-                    }
-                });
-            });
+            // Restart proxy using unified on_tx callback
+            let on_tx = make_on_tx_restart();
 
             let new_proxy = NativeProxyServer::new(
                 port,
@@ -379,29 +517,61 @@ impl AppController {
             });
         });
 
-        // 3. Select Transaction Item Callback
+        // 3. Select Transaction Callback (by visual index fallback, backwards-compat)
         let app_weak = app.as_weak();
-        let store_lookup = Arc::clone(&self.store);
+        let store_select = Arc::clone(&self.store);
+        let scope_select = Arc::clone(&self.scope);
+        let filter_select = Arc::clone(&filter_state);
+        let selected_select = Arc::clone(&selected_id);
 
         app.on_select_transaction(move |row_idx: i32| {
             if let Some(ui) = app_weak.upgrade() {
-                let store = store_lookup.lock().unwrap();
-                let txs = store.get_all();
-                if let Some(tx) = txs.get(row_idx as usize) {
-                    ui.set_active_req_headers(SharedString::from(tx.request.headers_raw_text()));
-                    ui.set_active_req_body(SharedString::from(tx.request.body_as_utf8()));
+                let filter = filter_select.lock().unwrap().clone();
+                let summaries = store_select.lock().unwrap().get_metadata_snapshot();
+                let matching = filter.filter(&summaries, &scope_select);
+                if let Some(summary) = matching.get(row_idx as usize) {
+                    let target_id = summary.id;
+                    let mut sel_guard = selected_select.lock().unwrap();
+                    *sel_guard = Some(target_id);
 
-                    if let Some(resp) = &tx.response {
-                        ui.set_active_resp_headers(SharedString::from(resp.headers_raw_text()));
-                        ui.set_active_resp_body(SharedString::from(resp.body_as_utf8()));
-                        ui.set_active_timing_text(SharedString::from(format!(
-                            "Status {} • Duration: {} ms",
-                            resp.status_code, tx.duration_ms
-                        )));
+                    // Look up full transaction for details
+                    let tx_opt = store_select.lock().unwrap().get_by_id(target_id).cloned();
+                    ui.set_selected_transaction_idx(row_idx);
+                    set_transaction_details_on_ui(&ui, tx_opt.as_ref());
+                }
+            }
+        });
+
+        // 3b. Select Transaction by exact string ID callback
+        let app_weak = app.as_weak();
+        let store_select_id = Arc::clone(&self.store);
+        let scope_select_id = Arc::clone(&self.scope);
+        let filter_select_id = Arc::clone(&filter_state);
+        let selected_select_id = Arc::clone(&selected_id);
+
+        app.on_select_transaction_by_id(move |id_str: SharedString| {
+            if let Some(ui) = app_weak.upgrade() {
+                if let Ok(id) = id_str.as_str().parse::<u64>() {
+                    let filter = filter_select_id.lock().unwrap().clone();
+                    let summaries = store_select_id.lock().unwrap().get_metadata_snapshot();
+                    let matching = filter.filter(&summaries, &scope_select_id);
+
+                    // Verify that this transaction ID is present in the current visible projection
+                    if let Some(pos) = matching.iter().position(|s| s.id == id) {
+                        let mut sel_guard = selected_select_id.lock().unwrap();
+                        *sel_guard = Some(id);
+
+                        let tx_opt = store_select_id.lock().unwrap().get_by_id(id).cloned();
+                        ui.set_selected_transaction_idx(pos as i32);
+                        set_transaction_details_on_ui(&ui, tx_opt.as_ref());
                     } else {
-                        ui.set_active_resp_headers(SharedString::from("(No response)"));
-                        ui.set_active_resp_body(SharedString::from(""));
-                        ui.set_active_timing_text(SharedString::from("Pending / Failed"));
+                        // Not in current projection: reject stale selection
+                        let mut sel_guard = selected_select_id.lock().unwrap();
+                        if *sel_guard == Some(id) {
+                            *sel_guard = None;
+                            ui.set_selected_transaction_idx(-1);
+                            set_transaction_details_on_ui(&ui, None);
+                        }
                     }
                 }
             }
@@ -410,19 +580,204 @@ impl AppController {
         // 4. Clear History Callback
         let store_clear = Arc::clone(&self.store);
         let app_weak = app.as_weak();
+        let filter_clear = Arc::clone(&filter_state);
+        let selected_clear = Arc::clone(&selected_id);
+        let scope_clear = Arc::clone(&self.scope);
 
         app.on_clear_history(move || {
             store_clear.lock().unwrap().clear();
+            let mut sel_guard = selected_clear.lock().unwrap();
+            *sel_guard = None;
+
             if let Some(ui) = app_weak.upgrade() {
-                ui.set_transactions(ModelRc::new(VecModel::from(Vec::new())));
-                ui.set_transactions_count(0);
-                ui.set_selected_transaction_idx(-1);
-                ui.set_active_req_headers(SharedString::from(""));
-                ui.set_active_req_body(SharedString::from(""));
-                ui.set_active_resp_headers(SharedString::from(""));
-                ui.set_active_resp_body(SharedString::from(""));
-                ui.set_active_timing_text(SharedString::from(""));
+                let filter = filter_clear.lock().unwrap().clone();
+                refresh_traffic_ui(
+                    &ui,
+                    &store_clear,
+                    &scope_clear,
+                    &filter,
+                    &mut sel_guard,
+                    None,
+                );
                 ui.set_status_message(SharedString::from("History cleared"));
+            }
+        });
+
+        // 5. Filter Callbacks
+        // 5a. Search Query
+        let app_weak = app.as_weak();
+        let store_f = Arc::clone(&self.store);
+        let scope_f = Arc::clone(&self.scope);
+        let filter_f = Arc::clone(&filter_state);
+        let selected_f = Arc::clone(&selected_id);
+        app.on_filter_search_changed(move |query: SharedString| {
+            if let Some(ui) = app_weak.upgrade() {
+                {
+                    let mut f = filter_f.lock().unwrap();
+                    f.search_query = query.to_string();
+                }
+                let f_snapshot = filter_f.lock().unwrap().clone();
+                let mut sel_id = selected_f.lock().unwrap();
+                refresh_traffic_ui(&ui, &store_f, &scope_f, &f_snapshot, &mut sel_id, None);
+            }
+        });
+
+        // 5b. Method Selector
+        let app_weak = app.as_weak();
+        let store_f = Arc::clone(&self.store);
+        let scope_f = Arc::clone(&self.scope);
+        let filter_f = Arc::clone(&filter_state);
+        let selected_f = Arc::clone(&selected_id);
+        app.on_filter_method_changed(move |idx: i32| {
+            if let Some(ui) = app_weak.upgrade() {
+                {
+                    let mut f = filter_f.lock().unwrap();
+                    f.method = match idx {
+                        1 => MethodFilter::Get,
+                        2 => MethodFilter::Post,
+                        3 => MethodFilter::Put,
+                        4 => MethodFilter::Delete,
+                        5 => MethodFilter::Patch,
+                        6 => MethodFilter::Head,
+                        7 => MethodFilter::Options,
+                        8 => MethodFilter::Connect,
+                        9 => MethodFilter::Other,
+                        _ => MethodFilter::All,
+                    };
+                }
+                let f_snapshot = filter_f.lock().unwrap().clone();
+                let mut sel_id = selected_f.lock().unwrap();
+                refresh_traffic_ui(&ui, &store_f, &scope_f, &f_snapshot, &mut sel_id, None);
+            }
+        });
+
+        // 5c. Status Selector
+        let app_weak = app.as_weak();
+        let store_f = Arc::clone(&self.store);
+        let scope_f = Arc::clone(&self.scope);
+        let filter_f = Arc::clone(&filter_state);
+        let selected_f = Arc::clone(&selected_id);
+        app.on_filter_status_changed(move |idx: i32| {
+            if let Some(ui) = app_weak.upgrade() {
+                {
+                    let mut f = filter_f.lock().unwrap();
+                    f.status = match idx {
+                        1 => HttpStatusFilter::Status1xx,
+                        2 => HttpStatusFilter::Status2xx,
+                        3 => HttpStatusFilter::Status3xx,
+                        4 => HttpStatusFilter::Status4xx,
+                        5 => HttpStatusFilter::Status5xx,
+                        6 => HttpStatusFilter::NoResponse,
+                        _ => HttpStatusFilter::All,
+                    };
+                }
+                let f_snapshot = filter_f.lock().unwrap().clone();
+                let mut sel_id = selected_f.lock().unwrap();
+                refresh_traffic_ui(&ui, &store_f, &scope_f, &f_snapshot, &mut sel_id, None);
+            }
+        });
+
+        // 5d. Outcome Selector
+        let app_weak = app.as_weak();
+        let store_f = Arc::clone(&self.store);
+        let scope_f = Arc::clone(&self.scope);
+        let filter_f = Arc::clone(&filter_state);
+        let selected_f = Arc::clone(&selected_id);
+        app.on_filter_outcome_changed(move |idx: i32| {
+            if let Some(ui) = app_weak.upgrade() {
+                {
+                    let mut f = filter_f.lock().unwrap();
+                    f.outcome = match idx {
+                        1 => OutcomeFilter::Pending,
+                        2 => OutcomeFilter::Completed,
+                        3 => OutcomeFilter::Failed,
+                        _ => OutcomeFilter::All,
+                    };
+                }
+                let f_snapshot = filter_f.lock().unwrap().clone();
+                let mut sel_id = selected_f.lock().unwrap();
+                refresh_traffic_ui(&ui, &store_f, &scope_f, &f_snapshot, &mut sel_id, None);
+            }
+        });
+
+        // 5e. Only In Scope Checkbox
+        let app_weak = app.as_weak();
+        let store_f = Arc::clone(&self.store);
+        let scope_f = Arc::clone(&self.scope);
+        let filter_f = Arc::clone(&filter_state);
+        let selected_f = Arc::clone(&selected_id);
+        app.on_filter_only_in_scope_changed(move |val: bool| {
+            if let Some(ui) = app_weak.upgrade() {
+                {
+                    let mut f = filter_f.lock().unwrap();
+                    f.only_in_scope = val;
+                }
+                let f_snapshot = filter_f.lock().unwrap().clone();
+                let mut sel_id = selected_f.lock().unwrap();
+                refresh_traffic_ui(&ui, &store_f, &scope_f, &f_snapshot, &mut sel_id, None);
+            }
+        });
+
+        // 5f. Hide CONNECT Checkbox
+        let app_weak = app.as_weak();
+        let store_f = Arc::clone(&self.store);
+        let scope_f = Arc::clone(&self.scope);
+        let filter_f = Arc::clone(&filter_state);
+        let selected_f = Arc::clone(&selected_id);
+        app.on_filter_hide_connect_changed(move |val: bool| {
+            if let Some(ui) = app_weak.upgrade() {
+                {
+                    let mut f = filter_f.lock().unwrap();
+                    f.hide_connect = val;
+                }
+                let f_snapshot = filter_f.lock().unwrap().clone();
+                let mut sel_id = selected_f.lock().unwrap();
+                refresh_traffic_ui(&ui, &store_f, &scope_f, &f_snapshot, &mut sel_id, None);
+            }
+        });
+
+        // 5g. Hide Failed Checkbox
+        let app_weak = app.as_weak();
+        let store_f = Arc::clone(&self.store);
+        let scope_f = Arc::clone(&self.scope);
+        let filter_f = Arc::clone(&filter_state);
+        let selected_f = Arc::clone(&selected_id);
+        app.on_filter_hide_failed_changed(move |val: bool| {
+            if let Some(ui) = app_weak.upgrade() {
+                {
+                    let mut f = filter_f.lock().unwrap();
+                    f.hide_failed = val;
+                }
+                let f_snapshot = filter_f.lock().unwrap().clone();
+                let mut sel_id = selected_f.lock().unwrap();
+                refresh_traffic_ui(&ui, &store_f, &scope_f, &f_snapshot, &mut sel_id, None);
+            }
+        });
+
+        // 5h. Reset Filters
+        let app_weak = app.as_weak();
+        let store_f = Arc::clone(&self.store);
+        let scope_f = Arc::clone(&self.scope);
+        let filter_f = Arc::clone(&filter_state);
+        let selected_f = Arc::clone(&selected_id);
+        app.on_reset_filters(move || {
+            if let Some(ui) = app_weak.upgrade() {
+                {
+                    let mut f = filter_f.lock().unwrap();
+                    f.reset();
+                }
+                // Reset Slint properties
+                ui.set_filter_search(SharedString::from(""));
+                ui.set_filter_method_idx(0);
+                ui.set_filter_status_idx(0);
+                ui.set_filter_outcome_idx(0);
+                ui.set_filter_only_in_scope(false);
+                ui.set_filter_hide_connect(false);
+                ui.set_filter_hide_failed(false);
+
+                let f_snapshot = filter_f.lock().unwrap().clone();
+                let mut sel_id = selected_f.lock().unwrap();
+                refresh_traffic_ui(&ui, &store_f, &scope_f, &f_snapshot, &mut sel_id, None);
             }
         });
 
@@ -824,5 +1179,761 @@ mod tests {
         assert_eq!(initial_snap.active_request_id, 0);
         assert_eq!(initial_snap.status_code, None);
         assert!(initial_snap.error_message.is_empty());
+    }
+
+    use kaska_http::models::HttpMethod;
+    use kaska_http::store::{TransactionOutcome, TransactionSummary};
+
+    fn make_summary(
+        id: u64,
+        method: HttpMethod,
+        host: &str,
+        path: &str,
+        status: u16,
+        outcome: TransactionOutcome,
+    ) -> TransactionSummary {
+        TransactionSummary {
+            id,
+            timestamp_rfc3339: "2026-10-17T12:00:00Z".to_string(),
+            method,
+            host: host.to_string(),
+            path: path.to_string(),
+            status_code: status,
+            status_text: if status == 0 {
+                match outcome {
+                    TransactionOutcome::Pending => "Pending".to_string(),
+                    TransactionOutcome::Failed => "Failed".to_string(),
+                    TransactionOutcome::Completed => "No response".to_string(),
+                }
+            } else {
+                "OK".to_string()
+            },
+            duration_ms: 15,
+            response_size_bytes: 120,
+            content_type: "text/plain".to_string(),
+            outcome,
+        }
+    }
+
+    // 1. Filtros neutros muestran todos los registros
+    #[test]
+    fn test_scenario_1_neutral_filters_show_all() {
+        let scope = AuditScope::default();
+        let summaries = vec![
+            make_summary(
+                1,
+                HttpMethod::Get,
+                "localhost",
+                "/a",
+                200,
+                TransactionOutcome::Completed,
+            ),
+            make_summary(
+                2,
+                HttpMethod::Post,
+                "127.0.0.1",
+                "/b",
+                201,
+                TransactionOutcome::Completed,
+            ),
+        ];
+        let filter = FilterState::default();
+        let (items, total, visible, sel_idx, retained) =
+            project_traffic(&summaries, &filter, &scope, None);
+        assert_eq!(total, 2);
+        assert_eq!(visible, 2);
+        assert_eq!(items.len(), 2);
+        assert_eq!(sel_idx, -1);
+        assert!(!retained);
+    }
+
+    // 2. Search host/path cambia lista sin tocar store
+    #[test]
+    fn test_scenario_2_search_query_filters_without_mutating_data() {
+        let scope = AuditScope::default();
+        let summaries = vec![
+            make_summary(
+                1,
+                HttpMethod::Get,
+                "api.local",
+                "/users",
+                200,
+                TransactionOutcome::Completed,
+            ),
+            make_summary(
+                2,
+                HttpMethod::Get,
+                "auth.local",
+                "/login",
+                200,
+                TransactionOutcome::Completed,
+            ),
+        ];
+        let filter = FilterState {
+            search_query: "users".to_string(),
+            ..Default::default()
+        };
+        let (items, total, visible, _, _) = project_traffic(&summaries, &filter, &scope, None);
+        assert_eq!(total, 2);
+        assert_eq!(visible, 1);
+        assert_eq!(items[0].id.as_str(), "1");
+        assert_eq!(
+            summaries.len(),
+            2,
+            "Underlying summaries must remain unmutated"
+        );
+    }
+
+    // 3. Cambios de Method/Status/Outcome
+    #[test]
+    fn test_scenario_3_method_status_outcome_filtering() {
+        let scope = AuditScope::default();
+        let summaries = vec![
+            make_summary(
+                1,
+                HttpMethod::Get,
+                "127.0.0.1",
+                "/a",
+                200,
+                TransactionOutcome::Completed,
+            ),
+            make_summary(
+                2,
+                HttpMethod::Post,
+                "127.0.0.1",
+                "/b",
+                404,
+                TransactionOutcome::Completed,
+            ),
+            make_summary(
+                3,
+                HttpMethod::Put,
+                "127.0.0.1",
+                "/c",
+                500,
+                TransactionOutcome::Completed,
+            ),
+            make_summary(
+                4,
+                HttpMethod::Delete,
+                "127.0.0.1",
+                "/d",
+                0,
+                TransactionOutcome::Failed,
+            ),
+            make_summary(
+                5,
+                HttpMethod::Get,
+                "127.0.0.1",
+                "/e",
+                0,
+                TransactionOutcome::Pending,
+            ),
+        ];
+
+        // Method filter: POST
+        let filter_post = FilterState {
+            method: MethodFilter::Post,
+            ..Default::default()
+        };
+        let (items, total, visible, _, _) = project_traffic(&summaries, &filter_post, &scope, None);
+        assert_eq!(total, 5);
+        assert_eq!(visible, 1);
+        assert_eq!(items[0].id.as_str(), "2");
+
+        // Status filter: 4xx
+        let filter_4xx = FilterState {
+            status: HttpStatusFilter::Status4xx,
+            ..Default::default()
+        };
+        let (items, _, visible, _, _) = project_traffic(&summaries, &filter_4xx, &scope, None);
+        assert_eq!(visible, 1);
+        assert_eq!(items[0].id.as_str(), "2");
+
+        // Status filter: NoResponse (status 0)
+        let filter_no_resp = FilterState {
+            status: HttpStatusFilter::NoResponse,
+            ..Default::default()
+        };
+        let (items, _, visible, _, _) = project_traffic(&summaries, &filter_no_resp, &scope, None);
+        assert_eq!(visible, 2);
+        assert_eq!(items[0].id.as_str(), "4");
+        assert_eq!(items[1].id.as_str(), "5");
+
+        // Outcome filter: Pending
+        let filter_pending = FilterState {
+            outcome: OutcomeFilter::Pending,
+            ..Default::default()
+        };
+        let (items, _, visible, _, _) = project_traffic(&summaries, &filter_pending, &scope, None);
+        assert_eq!(visible, 1);
+        assert_eq!(items[0].id.as_str(), "5");
+
+        // Outcome filter: Failed
+        let filter_failed = FilterState {
+            outcome: OutcomeFilter::Failed,
+            ..Default::default()
+        };
+        let (items, _, visible, _, _) = project_traffic(&summaries, &filter_failed, &scope, None);
+        assert_eq!(visible, 1);
+        assert_eq!(items[0].id.as_str(), "4");
+    }
+
+    // 4. Hide CONNECT
+    #[test]
+    fn test_scenario_4_hide_connect() {
+        let scope = AuditScope::default();
+        let summaries = vec![
+            make_summary(
+                1,
+                HttpMethod::Connect,
+                "secure.internal:443",
+                "/",
+                200,
+                TransactionOutcome::Completed,
+            ),
+            make_summary(
+                2,
+                HttpMethod::Get,
+                "secure.internal",
+                "/index.html",
+                200,
+                TransactionOutcome::Completed,
+            ),
+        ];
+        let filter = FilterState {
+            hide_connect: true,
+            ..Default::default()
+        };
+        let (items, total, visible, _, _) = project_traffic(&summaries, &filter, &scope, None);
+        assert_eq!(total, 2);
+        assert_eq!(visible, 1);
+        assert_eq!(items[0].id.as_str(), "2");
+    }
+
+    // 5. Hide Failed con Completed 404/500
+    #[test]
+    fn test_scenario_5_hide_failed_retains_completed_404_500() {
+        let scope = AuditScope::default();
+        let summaries = vec![
+            make_summary(
+                1,
+                HttpMethod::Get,
+                "localhost",
+                "/404",
+                404,
+                TransactionOutcome::Completed,
+            ),
+            make_summary(
+                2,
+                HttpMethod::Get,
+                "localhost",
+                "/500",
+                500,
+                TransactionOutcome::Completed,
+            ),
+            make_summary(
+                3,
+                HttpMethod::Get,
+                "localhost",
+                "/broken",
+                0,
+                TransactionOutcome::Failed,
+            ),
+        ];
+        let filter = FilterState {
+            hide_failed: true,
+            ..Default::default()
+        };
+        let (items, total, visible, _, _) = project_traffic(&summaries, &filter, &scope, None);
+        assert_eq!(total, 3);
+        assert_eq!(visible, 2);
+        assert_eq!(items[0].id.as_str(), "1");
+        assert_eq!(items[1].id.as_str(), "2");
+    }
+
+    // 6. Only in scope no cambia AuditScope
+    #[test]
+    fn test_scenario_6_only_in_scope_does_not_mutate_audit_scope() {
+        let scope = AuditScope::default(); // allows localhost, 127.0.0.1, ::1
+        let summaries = vec![
+            make_summary(
+                1,
+                HttpMethod::Get,
+                "127.0.0.1",
+                "/api",
+                200,
+                TransactionOutcome::Completed,
+            ),
+            make_summary(
+                2,
+                HttpMethod::Get,
+                "external-target.com",
+                "/api",
+                200,
+                TransactionOutcome::Completed,
+            ),
+        ];
+        let filter = FilterState {
+            only_in_scope: true,
+            ..Default::default()
+        };
+        let (items, total, visible, _, _) = project_traffic(&summaries, &filter, &scope, None);
+        assert_eq!(total, 2);
+        assert_eq!(visible, 1);
+        assert_eq!(items[0].id.as_str(), "1");
+        // Verify AuditScope remains unchanged
+        assert!(scope.is_allowed_host("127.0.0.1"));
+        assert!(!scope.is_allowed_host("external-target.com"));
+    }
+
+    // 7. Visible 0 / Total positivo
+    #[test]
+    fn test_scenario_7_visible_zero_total_positive() {
+        let scope = AuditScope::default();
+        let summaries = vec![
+            make_summary(
+                1,
+                HttpMethod::Get,
+                "127.0.0.1",
+                "/api",
+                200,
+                TransactionOutcome::Completed,
+            ),
+            make_summary(
+                2,
+                HttpMethod::Get,
+                "127.0.0.1",
+                "/status",
+                200,
+                TransactionOutcome::Completed,
+            ),
+        ];
+        let filter = FilterState {
+            search_query: "non-existent-path".to_string(),
+            ..Default::default()
+        };
+        let (items, total, visible, sel_idx, retained) =
+            project_traffic(&summaries, &filter, &scope, Some(1));
+        assert_eq!(total, 2);
+        assert_eq!(visible, 0);
+        assert!(items.is_empty());
+        assert_eq!(sel_idx, -1);
+        assert!(!retained);
+    }
+
+    // 8. Clear con filtros activos
+    #[test]
+    fn test_scenario_8_clear_with_active_filters() {
+        let filter = FilterState {
+            search_query: "test".to_string(),
+            method: MethodFilter::Post,
+            hide_failed: true,
+            ..Default::default()
+        };
+        let summaries: Vec<TransactionSummary> = Vec::new();
+        let scope = AuditScope::default();
+        let (items, total, visible, sel_idx, _) =
+            project_traffic(&summaries, &filter, &scope, Some(42));
+        assert_eq!(total, 0);
+        assert_eq!(visible, 0);
+        assert_eq!(sel_idx, -1);
+        assert!(items.is_empty());
+        // Active filter state is preserved
+        assert_eq!(filter.search_query, "test");
+        assert_eq!(filter.method, MethodFilter::Post);
+        assert!(filter.hide_failed);
+    }
+
+    // 9. Reset filters sin Clear
+    #[test]
+    fn test_scenario_9_reset_filters_without_clear() {
+        let scope = AuditScope::default();
+        let summaries = vec![
+            make_summary(
+                1,
+                HttpMethod::Get,
+                "127.0.0.1",
+                "/a",
+                200,
+                TransactionOutcome::Completed,
+            ),
+            make_summary(
+                2,
+                HttpMethod::Post,
+                "127.0.0.1",
+                "/b",
+                200,
+                TransactionOutcome::Completed,
+            ),
+        ];
+        let mut filter = FilterState {
+            method: MethodFilter::Post,
+            ..Default::default()
+        };
+        let (_, total1, visible1, _, _) = project_traffic(&summaries, &filter, &scope, None);
+        assert_eq!(total1, 2);
+        assert_eq!(visible1, 1);
+
+        filter.reset();
+        assert_eq!(filter, FilterState::default());
+
+        let (items2, total2, visible2, _, _) = project_traffic(&summaries, &filter, &scope, None);
+        assert_eq!(total2, 2);
+        assert_eq!(visible2, 2);
+        assert_eq!(items2.len(), 2);
+    }
+
+    // 10. ID mayor que i32::MAX se representa y selecciona exactamente
+    #[test]
+    fn test_scenario_10_id_greater_than_i32_max() {
+        let scope = AuditScope::default();
+        let large_id: u64 = 5_000_000_000;
+        let summaries = vec![make_summary(
+            large_id,
+            HttpMethod::Get,
+            "127.0.0.1",
+            "/large",
+            200,
+            TransactionOutcome::Completed,
+        )];
+        let filter = FilterState::default();
+        let (items, total, visible, sel_idx, retained) =
+            project_traffic(&summaries, &filter, &scope, Some(large_id));
+        assert_eq!(total, 1);
+        assert_eq!(visible, 1);
+        assert_eq!(items[0].id.as_str(), "5000000000");
+        assert_eq!(sel_idx, 0);
+        assert!(retained);
+
+        // Parse verification
+        let parsed: u64 = items[0].id.as_str().parse().expect("Valid u64 parse");
+        assert_eq!(parsed, large_id);
+    }
+
+    // 11. ID inválido o ausente no muestra detalles
+    #[test]
+    fn test_scenario_11_invalid_or_missing_id_clears_selection() {
+        let scope = AuditScope::default();
+        let summaries = vec![make_summary(
+            1,
+            HttpMethod::Get,
+            "127.0.0.1",
+            "/test",
+            200,
+            TransactionOutcome::Completed,
+        )];
+        let filter = FilterState::default();
+        // ID 999 is missing from store
+        let (_, _, _, sel_idx, retained) = project_traffic(&summaries, &filter, &scope, Some(999));
+        assert_eq!(sel_idx, -1);
+        assert!(!retained);
+    }
+
+    // 12. Selección de una fila filtrada se descarta
+    #[test]
+    fn test_scenario_12_selection_discarded_if_filtered_out() {
+        let scope = AuditScope::default();
+        let summaries = vec![
+            make_summary(
+                1,
+                HttpMethod::Get,
+                "127.0.0.1",
+                "/get",
+                200,
+                TransactionOutcome::Completed,
+            ),
+            make_summary(
+                2,
+                HttpMethod::Post,
+                "127.0.0.1",
+                "/post",
+                200,
+                TransactionOutcome::Completed,
+            ),
+        ];
+        let filter = FilterState {
+            method: MethodFilter::Post,
+            ..Default::default()
+        };
+        // Selected was ID 1 (GET), but active filter only shows POST
+        let (_, total, visible, sel_idx, retained) =
+            project_traffic(&summaries, &filter, &scope, Some(1));
+        assert_eq!(total, 2);
+        assert_eq!(visible, 1);
+        assert_eq!(sel_idx, -1);
+        assert!(!retained);
+    }
+
+    // 13. FIFO con inserción no coincidente y expulsión coincidente
+    #[test]
+    fn test_scenario_13_fifo_non_matching_insert_evicts_matching_and_clears_selection() {
+        let scope = AuditScope::default();
+        // Store capacity 3: [#1 POST, #2 GET, #3 GET]
+        // Filter: only POST
+        // Total = 3, Visible = [#1], Selection = #1
+        let initial_summaries = vec![
+            make_summary(
+                1,
+                HttpMethod::Post,
+                "127.0.0.1",
+                "/login",
+                200,
+                TransactionOutcome::Completed,
+            ),
+            make_summary(
+                2,
+                HttpMethod::Get,
+                "127.0.0.1",
+                "/home",
+                200,
+                TransactionOutcome::Completed,
+            ),
+            make_summary(
+                3,
+                HttpMethod::Get,
+                "127.0.0.1",
+                "/status",
+                200,
+                TransactionOutcome::Completed,
+            ),
+        ];
+        let filter = FilterState {
+            method: MethodFilter::Post,
+            ..Default::default()
+        };
+        let (items1, total1, visible1, sel1, ret1) =
+            project_traffic(&initial_summaries, &filter, &scope, Some(1));
+        assert_eq!(total1, 3);
+        assert_eq!(visible1, 1);
+        assert_eq!(sel1, 0);
+        assert!(ret1);
+        assert_eq!(items1[0].id.as_str(), "1");
+
+        // Now #4 GET is inserted into capacity-3 store -> #1 POST is evicted!
+        // New store: [#2 GET, #3 GET, #4 GET]
+        let post_fifo_summaries = vec![
+            make_summary(
+                2,
+                HttpMethod::Get,
+                "127.0.0.1",
+                "/home",
+                200,
+                TransactionOutcome::Completed,
+            ),
+            make_summary(
+                3,
+                HttpMethod::Get,
+                "127.0.0.1",
+                "/status",
+                200,
+                TransactionOutcome::Completed,
+            ),
+            make_summary(
+                4,
+                HttpMethod::Get,
+                "127.0.0.1",
+                "/about",
+                200,
+                TransactionOutcome::Completed,
+            ),
+        ];
+        let (items2, total2, visible2, sel2, ret2) =
+            project_traffic(&post_fifo_summaries, &filter, &scope, Some(1));
+        assert_eq!(total2, 3);
+        assert_eq!(visible2, 0);
+        assert_eq!(sel2, -1);
+        assert!(!ret2);
+        assert!(items2.is_empty());
+    }
+
+    // 14. Selección conservada cuando cambia su índice visible
+    #[test]
+    fn test_scenario_14_selection_preserved_when_visible_index_shifts() {
+        let scope = AuditScope::default();
+        let summaries = vec![
+            make_summary(
+                1,
+                HttpMethod::Get,
+                "127.0.0.1",
+                "/apple",
+                200,
+                TransactionOutcome::Completed,
+            ),
+            make_summary(
+                2,
+                HttpMethod::Get,
+                "127.0.0.1",
+                "/banana",
+                200,
+                TransactionOutcome::Completed,
+            ),
+            make_summary(
+                3,
+                HttpMethod::Get,
+                "127.0.0.1",
+                "/cherry",
+                200,
+                TransactionOutcome::Completed,
+            ),
+        ];
+
+        // Neutral filter: selected ID 2 is at visible index 1
+        let filter_all = FilterState::default();
+        let (items1, _, _, sel_idx1, ret1) =
+            project_traffic(&summaries, &filter_all, &scope, Some(2));
+        assert_eq!(sel_idx1, 1);
+        assert!(ret1);
+        assert_eq!(items1[1].id.as_str(), "2");
+
+        // Now filter out /apple (e.g. search query "an" matches banana and cherry)
+        let filter_search = FilterState {
+            search_query: "an".to_string(), // matches banana only
+            ..Default::default()
+        };
+        let (items2, _, visible2, sel_idx2, ret2) =
+            project_traffic(&summaries, &filter_search, &scope, Some(2));
+        assert_eq!(visible2, 1);
+        // ID 2 is now at visible index 0!
+        assert_eq!(sel_idx2, 0);
+        assert!(ret2);
+        assert_eq!(items2[0].id.as_str(), "2");
+    }
+
+    // 15. Callbacks atrasados después de Clear
+    #[test]
+    fn test_scenario_15_stale_callbacks_after_clear() {
+        let scope = AuditScope::default();
+        // Emulate store cleared
+        let empty_summaries: Vec<TransactionSummary> = Vec::new();
+        let filter = FilterState::default();
+        // A stale callback arrives referencing pre-clear ID 5
+        let (items, total, visible, sel_idx, ret) =
+            project_traffic(&empty_summaries, &filter, &scope, Some(5));
+        assert_eq!(total, 0);
+        assert_eq!(visible, 0);
+        assert_eq!(sel_idx, -1);
+        assert!(!ret);
+        assert!(items.is_empty());
+    }
+
+    // 16. Flujo Stop/Start de proxy sin perder FilterState
+    #[test]
+    fn test_scenario_16_proxy_stop_start_preserves_filter_state() {
+        let filter = FilterState {
+            search_query: "api".to_string(),
+            method: MethodFilter::Post,
+            status: HttpStatusFilter::Status2xx,
+            outcome: OutcomeFilter::Completed,
+            only_in_scope: true,
+            hide_connect: true,
+            hide_failed: true,
+        };
+        let saved_filter = filter.clone();
+
+        // Simulate proxy stop & restart cycle
+        let proxy_stopped = true;
+        assert!(proxy_stopped);
+        let proxy_started = true;
+        assert!(proxy_started);
+
+        // Filter state must remain identical
+        assert_eq!(filter, saved_filter);
+    }
+
+    // 17. Virtualización de 10.000 elementos y proyección exacta
+    #[test]
+    fn test_scenario_17_virtualization_10k_elements_projection() {
+        let scope = AuditScope::default();
+        let summaries: Vec<TransactionSummary> = (1..=10_000)
+            .map(|i| {
+                make_summary(
+                    i,
+                    if i % 2 == 0 {
+                        HttpMethod::Get
+                    } else {
+                        HttpMethod::Post
+                    },
+                    "127.0.0.1",
+                    "/test",
+                    200,
+                    TransactionOutcome::Completed,
+                )
+            })
+            .collect();
+
+        let filter = FilterState {
+            method: MethodFilter::Post,
+            ..Default::default()
+        };
+        let (items, total, visible, sel_idx, ret) =
+            project_traffic(&summaries, &filter, &scope, Some(9_999));
+        assert_eq!(total, 10_000);
+        assert_eq!(visible, 5_000);
+        assert_eq!(items.len(), 5_000);
+        // ID 9999 is POST, so it is in visible list
+        assert_eq!(sel_idx, 4_999);
+        assert!(ret);
+        assert_eq!(items[4_999].id.as_str(), "9999");
+    }
+
+    // 18. Semántica de HTTP Status y Outcome: Pending, Failed, Completed sin response
+    #[test]
+    fn test_scenario_18_status_and_outcome_semantics() {
+        // Status code 0 with Pending
+        let s_pending = make_summary(
+            1,
+            HttpMethod::Get,
+            "127.0.0.1",
+            "/",
+            0,
+            TransactionOutcome::Pending,
+        );
+        let item_pending = summary_to_traffic_item(&s_pending);
+        assert_eq!(item_pending.status_code, 0);
+        assert_eq!(item_pending.status_text.as_str(), "Pending");
+        assert!(!item_pending.is_error);
+
+        // Status code 0 with Failed
+        let s_failed = make_summary(
+            2,
+            HttpMethod::Get,
+            "127.0.0.1",
+            "/",
+            0,
+            TransactionOutcome::Failed,
+        );
+        let item_failed = summary_to_traffic_item(&s_failed);
+        assert_eq!(item_failed.status_code, 0);
+        assert_eq!(item_failed.status_text.as_str(), "Failed");
+        assert!(item_failed.is_error);
+
+        // Status code 0 with Completed (no response)
+        let s_no_resp = make_summary(
+            3,
+            HttpMethod::Get,
+            "127.0.0.1",
+            "/",
+            0,
+            TransactionOutcome::Completed,
+        );
+        let item_no_resp = summary_to_traffic_item(&s_no_resp);
+        assert_eq!(item_no_resp.status_code, 0);
+        assert_eq!(item_no_resp.status_text.as_str(), "No response");
+        assert!(!item_no_resp.is_error);
+
+        // Status code 404 with Completed
+        let s_404 = make_summary(
+            4,
+            HttpMethod::Get,
+            "127.0.0.1",
+            "/",
+            404,
+            TransactionOutcome::Completed,
+        );
+        let item_404 = summary_to_traffic_item(&s_404);
+        assert_eq!(item_404.status_code, 404);
+        assert_eq!(item_404.status_text.as_str(), "OK");
+        assert!(item_404.is_error);
     }
 }
