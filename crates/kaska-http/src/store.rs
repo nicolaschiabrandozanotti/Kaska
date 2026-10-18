@@ -5,6 +5,43 @@ use std::sync::{Arc, Mutex};
 /// Maximum number of transactions kept in memory to maintain low RAM footprint
 const DEFAULT_MAX_CAPACITY: usize = 10_000;
 
+/// Lightweight, neutral transaction outcome enum for metadata snapshots and filtering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TransactionOutcome {
+    Pending,
+    Completed,
+    Failed,
+}
+
+impl From<&crate::models::TransactionState> for TransactionOutcome {
+    fn from(state: &crate::models::TransactionState) -> Self {
+        match state {
+            crate::models::TransactionState::Pending => TransactionOutcome::Pending,
+            crate::models::TransactionState::Completed => TransactionOutcome::Completed,
+            crate::models::TransactionState::Failed(_) => TransactionOutcome::Failed,
+        }
+    }
+}
+
+/// Lightweight, neutral summary of an HTTP transaction for list views and Inspector filtering.
+///
+/// Contains strictly necessary metadata without cloning large request/response body buffers
+/// or full header collections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionSummary {
+    pub id: u64,
+    pub timestamp_rfc3339: String,
+    pub method: crate::models::HttpMethod,
+    pub host: String,
+    pub path: String,
+    pub status_code: u16,
+    pub status_text: String,
+    pub duration_ms: u64,
+    pub response_size_bytes: usize,
+    pub content_type: String,
+    pub outcome: TransactionOutcome,
+}
+
 #[derive(Debug)]
 pub struct TrafficStore {
     transactions: VecDeque<HttpTransaction>,
@@ -46,6 +83,28 @@ impl TrafficStore {
 
     pub fn get_all(&self) -> Vec<HttpTransaction> {
         self.transactions.iter().cloned().collect()
+    }
+
+    /// Returns a lightweight snapshot of transaction metadata in preserved chronological insertion order.
+    ///
+    /// Does not clone request or response body buffers or full header collections.
+    pub fn get_metadata_snapshot(&self) -> Vec<TransactionSummary> {
+        self.transactions
+            .iter()
+            .map(|tx| TransactionSummary {
+                id: tx.id,
+                timestamp_rfc3339: tx.timestamp_rfc3339.clone(),
+                method: tx.request.method.clone(),
+                host: tx.request.host.clone(),
+                path: tx.request.path.clone(),
+                status_code: tx.status_code(),
+                status_text: tx.status_text().to_string(),
+                duration_ms: tx.duration_ms,
+                response_size_bytes: tx.response_size_bytes(),
+                content_type: tx.content_type(),
+                outcome: TransactionOutcome::from(&tx.state),
+            })
+            .collect()
     }
 
     pub fn count(&self) -> usize {
