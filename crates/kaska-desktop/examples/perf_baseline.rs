@@ -60,6 +60,7 @@ pub enum CliCommand {
     Pilot25,
     Pilot100,
     All,
+    Inspector10k,
     Help,
 }
 
@@ -110,6 +111,12 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
                 }
                 command = Some(CliCommand::All);
             }
+            "--inspector-10k" => {
+                if command.is_some() {
+                    return Err(format!("Conflicting command specified: '{}'", arg));
+                }
+                command = Some(CliCommand::Inspector10k);
+            }
             "--help" | "-h" => {
                 return Ok(CliConfig {
                     command: CliCommand::Help,
@@ -125,7 +132,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
             }
             unknown => {
                 return Err(format!(
-                    "Unknown or unauthorized argument '{}'. Allowed options: --validate, --pilot-5, --pilot-25, --pilot-100, --all, --output-dir <DIR>, --help",
+                    "Unknown or unauthorized argument '{}'. Allowed options: --validate, --pilot-5, --pilot-25, --pilot-100, --all, --inspector-10k, --output-dir <DIR>, --help",
                     unknown
                 ));
             }
@@ -134,7 +141,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
     }
 
     let cmd = command.ok_or_else(|| {
-        "No command specified. Usage: perf_baseline [--validate | --pilot-5 | --pilot-25 | --pilot-100 | --all] [--output-dir <DIR>]".to_string()
+        "No command specified. Usage: perf_baseline [--validate | --pilot-5 | --pilot-25 | --pilot-100 | --all | --inspector-10k] [--output-dir <DIR>]".to_string()
     })?;
 
     Ok(CliConfig {
@@ -326,6 +333,17 @@ impl SampleStatistics {
             median,
             std_dev,
         })
+    }
+
+    pub fn p95(&self) -> f64 {
+        if self.raw_samples.is_empty() {
+            return 0.0;
+        }
+        let mut sorted = self.raw_samples.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx = ((sorted.len() as f64) * 0.95).ceil() as usize;
+        let clamped = idx.saturating_sub(1).min(sorted.len() - 1);
+        sorted[clamped]
     }
 }
 
@@ -1255,7 +1273,275 @@ pub fn run_prf06_limits_check() -> ModuleResult {
     }
 }
 
-/// Detailed result of the End-to-End HTTP loopback scenario
+/// Inspector 10k Pipeline Benchmark Result
+#[derive(Debug, Clone)]
+pub struct Inspector10kResult {
+    pub metadata_snapshot: SampleStatistics,
+    pub neutral_filter: SampleStatistics,
+    pub restrictive_filter: SampleStatistics,
+    pub text_search: SampleStatistics,
+    pub model_projection: SampleStatistics,
+    pub full_pipeline: SampleStatistics,
+    pub legacy_comparison: SampleStatistics,
+    pub details_lookup: SampleStatistics,
+    pub total_transactions: usize,
+    pub neutral_visible: usize,
+    pub restrictive_visible: usize,
+    pub text_search_visible: usize,
+}
+
+/// Runs the 10,000 transaction Inspector metadata and filtering pipeline benchmark.
+/// Measures the 8 specified stages with in-memory synthetic transactions, warmup, and repetitions.
+pub fn run_inspector_10k_microbenchmark(iterations: usize) -> Inspector10kResult {
+    let n = 10_000;
+    let synth = generate_synthetic_transactions(n, DEFAULT_FIXED_SEED);
+    let mut store = TrafficStore::new(10_000);
+    for tx in synth {
+        store.insert(tx);
+    }
+    let store_arc = Arc::new(Mutex::new(store));
+    let scope = AuditScope::default();
+
+    let neutral_filter = filter::FilterState::default();
+    let restrictive_filter = filter::FilterState {
+        method: filter::MethodFilter::Post,
+        status: filter::HttpStatusFilter::Status2xx,
+        outcome: filter::OutcomeFilter::Completed,
+        ..Default::default()
+    };
+
+    let search_filter = filter::FilterState {
+        search_query: "status".to_string(),
+        ..Default::default()
+    };
+
+    let target_id = 5000u64;
+
+    // Warm-up pass (unmeasured)
+    {
+        let store = store_arc.lock().unwrap();
+        let snap = std::hint::black_box(store.get_metadata_snapshot());
+        let _ = std::hint::black_box(neutral_filter.filter(&snap, &scope));
+        let _ = std::hint::black_box(restrictive_filter.filter(&snap, &scope));
+        let _ = std::hint::black_box(search_filter.filter(&snap, &scope));
+        let (items, _, _, _, _) =
+            controller::project_traffic(&snap, &neutral_filter, &scope, Some(target_id));
+        let model = std::hint::black_box(ModelRc::new(VecModel::from(items)));
+        std::hint::black_box(&model);
+        let all_txs = std::hint::black_box(store.get_all());
+        std::hint::black_box(&all_txs);
+        let detail = std::hint::black_box(store.get_by_id(target_id));
+        std::hint::black_box(&detail);
+    }
+
+    let mut snap_samples = Vec::with_capacity(iterations);
+    let mut neutral_samples = Vec::with_capacity(iterations);
+    let mut restr_samples = Vec::with_capacity(iterations);
+    let mut search_samples = Vec::with_capacity(iterations);
+    let mut proj_samples = Vec::with_capacity(iterations);
+    let mut pipe_samples = Vec::with_capacity(iterations);
+    let mut legacy_samples = Vec::with_capacity(iterations);
+    let mut detail_samples = Vec::with_capacity(iterations);
+
+    let mut neutral_vis = 0;
+    let mut restr_vis = 0;
+    let mut search_vis = 0;
+
+    for _ in 0..iterations {
+        // Stage 1: get_metadata_snapshot() latency under lock
+        let t0 = Instant::now();
+        let snap = {
+            let store = store_arc.lock().unwrap();
+            std::hint::black_box(store.get_metadata_snapshot())
+        };
+        let t1 = Instant::now();
+        snap_samples.push((t1 - t0).as_nanos() as f64 / 1000.0);
+
+        // Stage 2: Neutral filter matching latency
+        let t2 = Instant::now();
+        let neutral_res = std::hint::black_box(neutral_filter.filter(&snap, &scope));
+        let t3 = Instant::now();
+        neutral_samples.push((t3 - t2).as_nanos() as f64 / 1000.0);
+        neutral_vis = neutral_res.len();
+
+        // Stage 3: Restrictive filter matching latency
+        let t4 = Instant::now();
+        let restr_res = std::hint::black_box(restrictive_filter.filter(&snap, &scope));
+        let t5 = Instant::now();
+        restr_samples.push((t5 - t4).as_nanos() as f64 / 1000.0);
+        restr_vis = restr_res.len();
+
+        // Stage 4: Case-insensitive text search over host/path
+        let t6 = Instant::now();
+        let search_res = std::hint::black_box(search_filter.filter(&snap, &scope));
+        let t7 = Instant::now();
+        search_samples.push((t7 - t6).as_nanos() as f64 / 1000.0);
+        search_vis = search_res.len();
+
+        // Stage 5: TrafficItem + ModelRc<TrafficItem> / VecModel projection latency
+        let t8 = Instant::now();
+        let items: Vec<TrafficItem> = neutral_res
+            .iter()
+            .map(|s| controller::summary_to_traffic_item(s))
+            .collect();
+        let model = std::hint::black_box(ModelRc::new(VecModel::from(items)));
+        std::hint::black_box(&model);
+        let t9 = Instant::now();
+        proj_samples.push((t9 - t8).as_nanos() as f64 / 1000.0);
+
+        // Stage 6: Combined end-to-end projection pipeline latency (lock snapshot -> filter -> project -> VecModel)
+        let t10 = Instant::now();
+        let pipe_snap = {
+            let store = store_arc.lock().unwrap();
+            std::hint::black_box(store.get_metadata_snapshot())
+        };
+        let (pipe_items, _tot, _vis, _idx, _retained) =
+            controller::project_traffic(&pipe_snap, &neutral_filter, &scope, Some(target_id));
+        let pipe_model = std::hint::black_box(ModelRc::new(VecModel::from(pipe_items)));
+        std::hint::black_box(&pipe_model);
+        let t11 = Instant::now();
+        pipe_samples.push((t11 - t10).as_nanos() as f64 / 1000.0);
+
+        // Stage 7: Controlled comparison with legacy get_all() path
+        let t12 = Instant::now();
+        let all_txs = {
+            let store = store_arc.lock().unwrap();
+            std::hint::black_box(store.get_all())
+        };
+        let legacy_items: Vec<TrafficItem> = all_txs
+            .into_iter()
+            .map(|t| TrafficItem {
+                id: SharedString::from(t.id.to_string()),
+                method: SharedString::from(t.request.method.to_string()),
+                host: SharedString::from(t.request.host.clone()),
+                path: SharedString::from(t.request.path.clone()),
+                status_code: t.status_code() as i32,
+                status_text: SharedString::from(t.status_text()),
+                duration_ms: t.duration_ms as i32,
+                size_bytes: t.response_size_bytes() as i32,
+                content_type: SharedString::from(t.content_type()),
+                is_error: t.is_error(),
+            })
+            .collect();
+        let legacy_model = std::hint::black_box(ModelRc::new(VecModel::from(legacy_items)));
+        std::hint::black_box(&legacy_model);
+        let t13 = Instant::now();
+        legacy_samples.push((t13 - t12).as_nanos() as f64 / 1000.0);
+
+        // Stage 8: Cost of accessing selected item details by u64 ID
+        let t14 = Instant::now();
+        let store = store_arc.lock().unwrap();
+        let item_ref = std::hint::black_box(store.get_by_id(target_id));
+        let res_details =
+            item_ref.map(|t| (t.request.headers_raw_text(), t.request.body_as_utf8()));
+        std::hint::black_box(&res_details);
+        drop(store);
+        let t15 = Instant::now();
+        detail_samples.push((t15 - t14).as_nanos() as f64 / 1000.0);
+    }
+
+    Inspector10kResult {
+        metadata_snapshot: SampleStatistics::compute(snap_samples).unwrap(),
+        neutral_filter: SampleStatistics::compute(neutral_samples).unwrap(),
+        restrictive_filter: SampleStatistics::compute(restr_samples).unwrap(),
+        text_search: SampleStatistics::compute(search_samples).unwrap(),
+        model_projection: SampleStatistics::compute(proj_samples).unwrap(),
+        full_pipeline: SampleStatistics::compute(pipe_samples).unwrap(),
+        legacy_comparison: SampleStatistics::compute(legacy_samples).unwrap(),
+        details_lookup: SampleStatistics::compute(detail_samples).unwrap(),
+        total_transactions: n,
+        neutral_visible: neutral_vis,
+        restrictive_visible: restr_vis,
+        text_search_visible: search_vis,
+    }
+}
+
+/// Formats the Inspector10kResult into an informative summary report string.
+pub fn format_inspector_10k_summary(res: &Inspector10kResult) -> String {
+    let mut out = String::new();
+    out.push_str("==================================================================\n");
+    out.push_str("MODULE: INSPECTOR 10,000 TRANSACTION PIPELINE BENCHMARK\n");
+    out.push_str("==================================================================\n");
+    out.push_str(&format!(
+        "Total in-memory transactions: {}\n",
+        res.total_transactions
+    ));
+    out.push_str(&format!(
+        "Neutral filter matching items: {}\n",
+        res.neutral_visible
+    ));
+    out.push_str(&format!(
+        "Restrictive filter matching items: {}\n",
+        res.restrictive_visible
+    ));
+    out.push_str(&format!(
+        "Text search matching items: {}\n\n",
+        res.text_search_visible
+    ));
+
+    let fmt_stage = |name: &str, s: &SampleStatistics| -> String {
+        format!(
+            "  • {:<35} min: {:>9.2} us | p50: {:>9.2} us | p95: {:>9.2} us | max: {:>9.2} us (mean: {:>9.2} us, std_dev: {:>7.2} us)\n",
+            name, s.min, s.median, s.p95(), s.max, s.mean, s.std_dev
+        )
+    };
+
+    out.push_str("PIPELINE STAGE LATENCIES (microseconds):\n");
+    out.push_str(&fmt_stage(
+        "1. get_metadata_snapshot()",
+        &res.metadata_snapshot,
+    ));
+    out.push_str(&fmt_stage(
+        "2. Neutral filter matching",
+        &res.neutral_filter,
+    ));
+    out.push_str(&fmt_stage(
+        "3. Restrictive filter matching",
+        &res.restrictive_filter,
+    ));
+    out.push_str(&fmt_stage("4. Host/path text search", &res.text_search));
+    out.push_str(&fmt_stage(
+        "5. Model projection (10k items)",
+        &res.model_projection,
+    ));
+    out.push_str(&fmt_stage(
+        "6. End-to-end projection pipeline",
+        &res.full_pipeline,
+    ));
+    out.push_str(&fmt_stage(
+        "7. Legacy get_all() path comparison",
+        &res.legacy_comparison,
+    ));
+    out.push_str(&fmt_stage(
+        "8. Single item detail by ID",
+        &res.details_lookup,
+    ));
+
+    let speedup = res.legacy_comparison.median / res.full_pipeline.median;
+    out.push_str("\nPIPELINE EFFICIENCY ANALYSIS:\n");
+    out.push_str(&format!(
+        "  • Metadata pipeline p50: {:.2} us vs Legacy get_all() p50: {:.2} us ({:.2}x speedup)\n",
+        res.full_pipeline.median, res.legacy_comparison.median, speedup
+    ));
+    out.push_str(&format!(
+        "  • Detail lookup by ID p50: {:.2} us vs Legacy full-clone p50: {:.2} us\n",
+        res.details_lookup.median, res.legacy_comparison.median
+    ));
+    out.push_str("------------------------------------------------------------------\n");
+    out.push_str("AUDIT & METHODOLOGY NOTES:\n");
+    out.push_str("  • Synthetic in-memory transactions with bounded payloads (<= 100 B), zero network I/O.\n");
+    out.push_str(
+        "  • std::hint::black_box used on all pipeline outputs to prevent dead-code elimination.\n",
+    );
+    out.push_str(
+        "  • Warm-up iteration executed prior to measured repetitions to prime allocator.\n",
+    );
+    out.push_str("  • NOTE: Microbenchmarks isolate heap allocation, metadata iteration, and ModelRc wrapping;\n");
+    out.push_str("    they do NOT measure real Slint UI render/event-loop scheduling latency.\n");
+    out.push_str("==================================================================\n");
+    out
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct E2eScenarioResult {
     pub target_dispatched: usize,
@@ -2748,12 +3034,13 @@ fn main() {
         println!("Usage: perf_baseline [COMMAND] [OPTIONS]");
         println!();
         println!("Commands:");
-        println!("  --validate    Execute probe validation without network load");
-        println!("  --pilot-5     Execute controlled pilot scenario N=5 exclusively");
-        println!("  --pilot-25    Execute controlled pilot scenario N=25 exclusively");
-        println!("  --pilot-100   Execute controlled pilot scenario N=100 exclusively");
-        println!("  --all         Execute sequential pilot scenarios N=5 and N=25 exclusively");
-        println!("  --help, -h    Display this help message");
+        println!("  --validate       Execute probe validation without network load");
+        println!("  --pilot-5        Execute controlled pilot scenario N=5 exclusively");
+        println!("  --pilot-25       Execute controlled pilot scenario N=25 exclusively");
+        println!("  --pilot-100      Execute controlled pilot scenario N=100 exclusively");
+        println!("  --all            Execute sequential pilot scenarios N=5 and N=25 exclusively");
+        println!("  --inspector-10k  Execute 10k transaction Inspector metadata & filtering pipeline benchmark");
+        println!("  --help, -h       Display this help message");
         println!();
         println!("Options:");
         println!("  --output-dir <DIR>  Specify custom output directory for evidence files");
@@ -2857,6 +3144,103 @@ fn main() {
             }
             Err(e) => {
                 eprintln!("ERROR: Failed to save validation evidence: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if config.command == CliCommand::Inspector10k {
+        let iterations = 10;
+        println!(
+            "\n>>> RUNNING INSPECTOR 10,000 TRANSACTION BENCHMARK (iterations = {})",
+            iterations
+        );
+        let res = run_inspector_10k_microbenchmark(iterations);
+        let summary = format_inspector_10k_summary(&res);
+        print!("{}", summary);
+        log_accumulator.push_str(&summary);
+
+        let mut json_out = String::new();
+        json_out.push_str("{\n");
+        json_out.push_str(&format!("  \"run_id\": \"{}\",\n", escape_json(&run_id)));
+        json_out.push_str(&format!(
+            "  \"timestamp_utc\": \"{}\",\n",
+            escape_json(&timestamp_utc)
+        ));
+        json_out.push_str("  \"command\": \"--inspector-10k\",\n");
+        json_out.push_str("  \"status\": \"PASS\",\n");
+        json_out.push_str(&format!(
+            "  \"build_profile\": \"{}\",\n",
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            }
+        ));
+        json_out.push_str(&format!(
+            "  \"total_transactions\": {},\n",
+            res.total_transactions
+        ));
+        json_out.push_str(&format!(
+            "  \"neutral_visible\": {},\n",
+            res.neutral_visible
+        ));
+        json_out.push_str(&format!(
+            "  \"restrictive_visible\": {},\n",
+            res.restrictive_visible
+        ));
+        json_out.push_str(&format!(
+            "  \"text_search_visible\": {},\n",
+            res.text_search_visible
+        ));
+        json_out.push_str("  \"stages_us\": {\n");
+        let fmt_stage_json = |s: &SampleStatistics| -> String {
+            format!("{{\"min\":{:.2},\"p50\":{:.2},\"p95\":{:.2},\"max\":{:.2},\"mean\":{:.2},\"std_dev\":{:.2}}}",
+                s.min, s.median, s.p95(), s.max, s.mean, s.std_dev)
+        };
+        json_out.push_str(&format!(
+            "    \"get_metadata_snapshot\": {},\n",
+            fmt_stage_json(&res.metadata_snapshot)
+        ));
+        json_out.push_str(&format!(
+            "    \"neutral_filter_matching\": {},\n",
+            fmt_stage_json(&res.neutral_filter)
+        ));
+        json_out.push_str(&format!(
+            "    \"restrictive_filter_matching\": {},\n",
+            fmt_stage_json(&res.restrictive_filter)
+        ));
+        json_out.push_str(&format!(
+            "    \"text_search\": {},\n",
+            fmt_stage_json(&res.text_search)
+        ));
+        json_out.push_str(&format!(
+            "    \"model_projection\": {},\n",
+            fmt_stage_json(&res.model_projection)
+        ));
+        json_out.push_str(&format!(
+            "    \"full_pipeline\": {},\n",
+            fmt_stage_json(&res.full_pipeline)
+        ));
+        json_out.push_str(&format!(
+            "    \"legacy_comparison\": {},\n",
+            fmt_stage_json(&res.legacy_comparison)
+        ));
+        json_out.push_str(&format!(
+            "    \"details_lookup_by_id\": {}\n",
+            fmt_stage_json(&res.details_lookup)
+        ));
+        json_out.push_str("  }\n");
+        json_out.push_str("}\n");
+
+        match save_evidence_files(&output_dir, &run_id, &log_accumulator, &json_out) {
+            Ok((sum_path, json_path)) => {
+                println!("\n>> Inspector 10k summary saved: {}", sum_path.display());
+                println!(">> Inspector 10k JSON saved: {}", json_path.display());
+            }
+            Err(e) => {
+                eprintln!("ERROR: Failed to save Inspector 10k evidence: {}", e);
                 std::process::exit(1);
             }
         }
@@ -2989,6 +3373,7 @@ fn main() {
         CliCommand::Pilot25 => "--pilot-25",
         CliCommand::Pilot100 => "--pilot-100",
         CliCommand::All => "--all",
+        CliCommand::Inspector10k => "--inspector-10k",
         CliCommand::Help => "--help",
     };
 
@@ -3090,6 +3475,12 @@ mod tests {
                 .unwrap()
                 .command,
             CliCommand::All
+        );
+        assert_eq!(
+            parse_cli_args(&["prog".into(), "--inspector-10k".into()])
+                .unwrap()
+                .command,
+            CliCommand::Inspector10k
         );
         assert_eq!(
             parse_cli_args(&["prog".into(), "--help".into()])
@@ -4256,6 +4647,47 @@ mod tests {
         .unwrap();
         assert_eq!(cfg_dir.command, CliCommand::Pilot100);
         assert_eq!(cfg_dir.output_dir, Some(PathBuf::from("/custom/dir")));
+    }
+
+    #[test]
+    fn test_cli_parser_inspector_10k_command() {
+        let cfg = parse_cli_args(&["prog".into(), "--inspector-10k".into()]).unwrap();
+        assert_eq!(cfg.command, CliCommand::Inspector10k);
+        assert_eq!(cfg.output_dir, None);
+
+        let cfg_dir = parse_cli_args(&[
+            "prog".into(),
+            "--inspector-10k".into(),
+            "--output-dir".into(),
+            "/custom/dir".into(),
+        ])
+        .unwrap();
+        assert_eq!(cfg_dir.command, CliCommand::Inspector10k);
+        assert_eq!(cfg_dir.output_dir, Some(PathBuf::from("/custom/dir")));
+    }
+
+    #[test]
+    fn test_cli_parser_rejects_conflicting_commands_with_inspector_10k() {
+        assert!(
+            parse_cli_args(&["prog".into(), "--inspector-10k".into(), "--pilot-5".into()]).is_err()
+        );
+        assert!(
+            parse_cli_args(&["prog".into(), "--inspector-10k".into(), "--pilot-25".into()])
+                .is_err()
+        );
+        assert!(parse_cli_args(&[
+            "prog".into(),
+            "--inspector-10k".into(),
+            "--pilot-100".into()
+        ])
+        .is_err());
+        assert!(
+            parse_cli_args(&["prog".into(), "--inspector-10k".into(), "--all".into()]).is_err()
+        );
+        assert!(
+            parse_cli_args(&["prog".into(), "--inspector-10k".into(), "--validate".into()])
+                .is_err()
+        );
     }
 
     #[test]

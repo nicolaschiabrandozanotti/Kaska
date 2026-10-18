@@ -157,6 +157,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let filter_reset_events = Rc::new(Cell::new(0usize));
     let fr_clone = filter_reset_events.clone();
     app.on_reset_filters(move || fr_clone.set(fr_clone.get() + 1));
+    let filter_search_events = Rc::new(RefCell::new(String::new()));
+    let fs_clone = filter_search_events.clone();
+    app.on_filter_search_changed(move |q| *fs_clone.borrow_mut() = q.to_string());
+    let filter_status_events = Rc::new(Cell::new(-1i32));
+    let fstat_clone = filter_status_events.clone();
+    app.on_filter_status_changed(move |idx| fstat_clone.set(idx));
+    let filter_outcome_events = Rc::new(Cell::new(-1i32));
+    let fo_clone = filter_outcome_events.clone();
+    app.on_filter_outcome_changed(move |idx| fo_clone.set(idx));
+    let filter_scope_events = Rc::new(Cell::new(false));
+    let fsc_clone = filter_scope_events.clone();
+    app.on_filter_only_in_scope_changed(move |v| fsc_clone.set(v));
+    let filter_connect_events = Rc::new(Cell::new(false));
+    let fc_clone = filter_connect_events.clone();
+    app.on_filter_hide_connect_changed(move |v| fc_clone.set(v));
+    let filter_failed_events = Rc::new(Cell::new(false));
+    let ff_clone = filter_failed_events.clone();
+    app.on_filter_hide_failed_changed(move |v| ff_clone.set(v));
     app.show()?;
     resize(app.window(), 1180.0, 680.0);
     let proxy_reservation = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -289,12 +307,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 app.window().dispatch_event(slint::platform::WindowEvent::PointerExited);
 
                 // Verify filter callbacks and controls are exercised
+                app.invoke_filter_search_changed("test search".into());
+                assert_eq!(*filter_search_events.borrow(), "test search", "Search query callback executed");
                 app.invoke_filter_method_changed(1);
                 assert_eq!(filter_method_events.get(), 1, "Filter method changed callback executed");
+                app.invoke_filter_status_changed(2);
+                assert_eq!(filter_status_events.get(), 2, "Filter status changed callback executed");
+                app.invoke_filter_outcome_changed(3);
+                assert_eq!(filter_outcome_events.get(), 3, "Filter outcome changed callback executed");
+                app.invoke_filter_only_in_scope_changed(true);
+                assert!(filter_scope_events.get(), "Filter only-in-scope callback executed");
+                app.invoke_filter_hide_connect_changed(true);
+                assert!(filter_connect_events.get(), "Filter hide-connect callback executed");
+                app.invoke_filter_hide_failed_changed(true);
+                assert!(filter_failed_events.get(), "Filter hide-failed callback executed");
+                app.invoke_select_transaction_by_id("42".into());
+                assert_eq!(*selected_id_cell.borrow(), "42", "Select transaction by ID callback executed");
                 app.invoke_reset_filters();
                 assert_eq!(filter_reset_events.get(), 1, "Reset filters callback executed");
 
-                println!("PASS: pointer/keyboard selection, 10,000 rows, action callbacks, loading guard, keyboard navigation, filter callbacks");
+                println!("PASS: pointer/keyboard selection, 10,000 rows, action callbacks, loading guard, keyboard navigation, all filter callbacks");
             }
             if index < sizes.len() * 4 {
                 let (width, height) = sizes[index / 4];
@@ -355,16 +387,110 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     assert!(live_wait.get() < 40, "Timed out waiting for real UI capture");
                     return;
                 }
+                assert_eq!(app.get_total_transactions_count(), 4, "Total count before filtering");
+                assert_eq!(app.get_visible_transactions_count(), 4, "Visible count before filtering");
+
                 // Pointer click on Row 0 at calculated Y = 256.0
                 click(app.window(), 230.0, 256.0);
                 assert_eq!(app.get_selected_transaction_idx(), 0);
                 assert!(!app.get_active_req_headers().is_empty());
                 assert!(!app.get_active_resp_headers().is_empty());
-                println!("PASS: real Rust controller -> loopback HTTP -> Slint traffic model and selected details; ports={proxy_port},{server_port}");
+
+                // Keyboard selection navigation to Row 1 (POST /api/echo)
+                key(app.window(), slint::platform::Key::DownArrow);
+                assert_eq!(app.get_selected_transaction_idx(), 1, "DownArrow navigates to row 1");
+
+                // Filter search: matches 'echo' (tx 2)
+                app.invoke_filter_search_changed("echo".into());
+                assert_eq!(app.get_total_transactions_count(), 4);
+                assert_eq!(app.get_visible_transactions_count(), 1, "Filter 'echo' matches 1 request");
+                assert_eq!(app.get_selected_transaction_idx(), 0, "Selection preserved by ID across search filter transition");
+
+                // Filter search: no match yields 0 visible
+                app.invoke_filter_search_changed("nonexistent_pattern_xyz".into());
+                assert_eq!(app.get_total_transactions_count(), 4);
+                assert_eq!(app.get_visible_transactions_count(), 0, "No match yields 0 visible");
+                assert_eq!(app.get_selected_transaction_idx(), -1, "No selection when visible count is 0");
+                save_snapshot(app.window(), &output.join("inspector-zero-visible.ppm"));
+
+                // Reset filters
+                app.invoke_reset_filters();
+                assert_eq!(app.get_total_transactions_count(), 4);
+                assert_eq!(app.get_visible_transactions_count(), 4, "Reset restores visible count to 4");
+                assert_eq!(app.get_filter_search(), "");
+                assert_eq!(app.get_filter_method_idx(), 0);
+                assert_eq!(app.get_filter_status_idx(), 0);
+                assert_eq!(app.get_filter_outcome_idx(), 0);
+                assert!(!app.get_filter_only_in_scope());
+                assert!(!app.get_filter_hide_connect());
+                assert!(!app.get_filter_hide_failed());
+
+                // Filter by Method POST (idx 2)
+                app.set_filter_method_idx(2);
+                app.invoke_filter_method_changed(2);
+                assert_eq!(app.get_visible_transactions_count(), 1, "Method POST matches 1 request");
+                app.invoke_reset_filters();
+                assert_eq!(app.get_filter_method_idx(), 0, "Reset restores method idx to 0");
+
+                // Filter by Status 4xx (idx 4)
+                app.set_filter_status_idx(4);
+                app.invoke_filter_status_changed(4);
+                assert_eq!(app.get_visible_transactions_count(), 1, "Status 4xx matches 1 request (403)");
+                app.invoke_reset_filters();
+                assert_eq!(app.get_filter_status_idx(), 0, "Reset restores status idx to 0");
+
+                // Scope & Exclusion Toggles
+                app.set_filter_only_in_scope(true);
+                app.invoke_filter_only_in_scope_changed(true);
+                assert!(app.get_filter_only_in_scope());
+                app.set_filter_hide_connect(true);
+                app.invoke_filter_hide_connect_changed(true);
+                assert!(app.get_filter_hide_connect());
+                app.set_filter_hide_failed(true);
+                app.invoke_filter_hide_failed_changed(true);
+                assert!(app.get_filter_hide_failed());
+                app.invoke_reset_filters();
+                assert!(!app.get_filter_only_in_scope(), "Reset clears only_in_scope");
+                assert!(!app.get_filter_hide_connect(), "Reset clears hide_connect");
+                assert!(!app.get_filter_hide_failed(), "Reset clears hide_failed");
+
+                // Select transaction explicitly by ID
+                app.invoke_select_transaction_by_id("3".into());
+                assert_eq!(app.get_selected_transaction_idx(), 2, "Select tx 3 gives visual index 2 in unfiltered table");
+
+                // Filter by Method GET (idx 1) -> matches 3 requests (IDs 1, 3, 4)
+                app.set_filter_method_idx(1);
+                app.invoke_filter_method_changed(1);
+                assert_eq!(app.get_visible_transactions_count(), 3, "GET matches 3 requests");
+                assert_eq!(app.get_selected_transaction_idx(), 1, "Tx 3 selection preserved at visible index 1 in filtered table");
+
+                // Mouse selection on filtered Row 0
+                click(app.window(), 230.0, 256.0);
+                assert_eq!(app.get_selected_transaction_idx(), 0, "Pointer clicks filtered row 0");
+
+                // Keyboard navigation across filtered rows
+                key(app.window(), slint::platform::Key::DownArrow);
+                assert_eq!(app.get_selected_transaction_idx(), 1, "DownArrow navigates to filtered row 1");
+                key(app.window(), slint::platform::Key::DownArrow);
+                assert_eq!(app.get_selected_transaction_idx(), 2, "DownArrow navigates to filtered row 2");
+                key(app.window(), slint::platform::Key::UpArrow);
+                assert_eq!(app.get_selected_transaction_idx(), 1, "UpArrow navigates back to filtered row 1");
+
+                save_snapshot(app.window(), &output.join("inspector-filters-active.ppm"));
+                app.invoke_reset_filters();
+
+                // Responsive 640x320 verification
+                resize(app.window(), 640.0, 320.0);
+                save_snapshot(app.window(), &output.join("inspector-compact-640x320.ppm"));
+                resize(app.window(), 1180.0, 680.0);
+
+                println!("PASS: real Rust controller -> loopback HTTP -> full Inspector QA (filters, search, ID preservation, mouse/keyboard selection, reset, responsive 640x320); ports={proxy_port},{server_port}");
             } else if index == sizes.len() * 4 + 4 {
                 if tick.is_multiple_of(2) {
                     app.invoke_clear_history();
                     assert_eq!(app.get_transactions_count(), 0);
+                    assert_eq!(app.get_total_transactions_count(), 0);
+                    assert_eq!(app.get_visible_transactions_count(), 0);
                     assert_eq!(app.get_selected_transaction_idx(), -1);
                     assert!(app.get_active_req_headers().is_empty());
                     assert!(app.get_active_resp_body().is_empty());
