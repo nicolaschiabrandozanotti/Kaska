@@ -9,6 +9,9 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 #[path = "repeater_adapter.rs"]
 pub mod repeater_adapter;
 
+#[path = "inspector_details.rs"]
+pub mod inspector_details;
+
 use crate::filter::{FilterState, HttpStatusFilter, MethodFilter, OutcomeFilter};
 use crate::platform::PlatformInfo;
 use crate::{AppWindow, TrafficItem};
@@ -83,11 +86,13 @@ pub fn project_traffic(
 pub fn set_transaction_details_on_ui(ui: &AppWindow, tx_opt: Option<&HttpTransaction>) {
     if let Some(tx) = tx_opt {
         ui.set_active_req_headers(SharedString::from(tx.request.headers_raw_text()));
-        ui.set_active_req_body(SharedString::from(tx.request.body_as_utf8()));
+        let req_preview = inspector_details::format_request_body_preview(&tx.request);
+        ui.set_active_req_body(SharedString::from(req_preview.text));
 
         if let Some(resp) = &tx.response {
             ui.set_active_resp_headers(SharedString::from(resp.headers_raw_text()));
-            ui.set_active_resp_body(SharedString::from(resp.body_as_utf8()));
+            let resp_preview = inspector_details::format_response_body_preview(resp);
+            ui.set_active_resp_body(SharedString::from(resp_preview.text));
             ui.set_active_timing_text(SharedString::from(format!(
                 "Status {} • Duration: {} ms",
                 resp.status_code, tx.duration_ms
