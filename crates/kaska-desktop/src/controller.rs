@@ -14,7 +14,7 @@ pub mod inspector_details;
 
 use crate::filter::{FilterState, HttpStatusFilter, MethodFilter, OutcomeFilter};
 use crate::platform::PlatformInfo;
-use crate::{AppWindow, TrafficItem};
+use crate::{AppWindow, HeaderItem, TrafficItem};
 use kaska_http::models::HttpTransaction;
 use kaska_http::proxy::NativeProxyServer;
 use kaska_http::scope::AuditScope;
@@ -82,36 +82,276 @@ pub fn project_traffic(
     )
 }
 
+/// Defensive budget constants for Inspector UI header projection (Gate 1.4B-2)
+pub const MAX_VISIBLE_HEADERS: usize = 256;
+pub const MAX_HEADER_NAME_BYTES: usize = 256;
+pub const MAX_HEADER_VALUE_BYTES: usize = 1024;
+pub const MAX_AGGREGATE_HEADER_BUDGET: usize = 256 * 1024;
+pub const MAX_HEADERS_TEXT_BUDGET: usize = 64 * 1024;
+pub const MASKED_SECRET_PLACEHOLDER: &str = "••••••••";
+
+/// Checks if an HTTP header name matches known sensitive credentials (case-insensitive).
+pub fn is_sensitive_header(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key" | "api-key"
+    )
+}
+
+/// Truncates string to `max_bytes` on a valid UTF-8 character boundary.
+pub fn floor_utf8_char_boundary_str(s: &str, max_bytes: usize) -> &str {
+    if max_bytes >= s.len() {
+        return s;
+    }
+    let mut idx = max_bytes;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    &s[..idx]
+}
+
+/// Sanitizes display text for safe single-line rendering in UI tables and text fields.
+/// Replaces control characters (< 0x20 and 0x7F) with spaces to prevent layout and injection issues.
+pub fn sanitize_display_text(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if (c < ' ' && c != '\t') || c == '\x7F' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Result of projecting a list of HTTP headers into Slint `HeaderItem`s under UI limits.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectedHeadersResult {
+    pub items: Vec<HeaderItem>,
+    pub omitted_count: usize,
+    pub notice: String,
+}
+
+/// Projects a list of `HttpHeader`s into Slint `HeaderItem` models under strict UI budgets.
+///
+/// Guarantees:
+/// - Preserves original order and duplicates.
+/// - Limits to `MAX_VISIBLE_HEADERS` (256).
+/// - Clamps name to `MAX_HEADER_NAME_BYTES` (256 B) and value to `MAX_HEADER_VALUE_BYTES` (1024 B).
+/// - Enforces aggregate budget `MAX_AGGREGATE_HEADER_BUDGET` (256 KiB).
+/// - If `reveal_secrets` is `false`, sensitive header values are masked as `••••••••`.
+/// - Never mutates original data in store.
+pub fn project_headers_to_slint(
+    headers: &[kaska_http::models::HttpHeader],
+    reveal_secrets: bool,
+) -> ProjectedHeadersResult {
+    let mut items = Vec::new();
+    let mut aggregate_bytes = 0usize;
+    let mut omitted_count = 0usize;
+
+    for (idx, h) in headers.iter().enumerate() {
+        if idx >= MAX_VISIBLE_HEADERS {
+            omitted_count = headers.len().saturating_sub(idx);
+            break;
+        }
+
+        let is_sensitive = is_sensitive_header(&h.name);
+        let raw_val = if is_sensitive && !reveal_secrets {
+            MASKED_SECRET_PLACEHOLDER
+        } else {
+            &h.value
+        };
+
+        let raw_name = &h.name;
+        let is_name_truncated = raw_name.len() > MAX_HEADER_NAME_BYTES;
+        let name_slice = floor_utf8_char_boundary_str(raw_name, MAX_HEADER_NAME_BYTES);
+        let clean_name = sanitize_display_text(name_slice);
+
+        let is_val_truncated = raw_val.len() > MAX_HEADER_VALUE_BYTES;
+        let val_slice = floor_utf8_char_boundary_str(raw_val, MAX_HEADER_VALUE_BYTES);
+        let clean_val = sanitize_display_text(val_slice);
+
+        let item_bytes = clean_name.len() + clean_val.len();
+        if aggregate_bytes.saturating_add(item_bytes) > MAX_AGGREGATE_HEADER_BUDGET {
+            omitted_count = headers.len().saturating_sub(idx);
+            break;
+        }
+        aggregate_bytes += item_bytes;
+
+        items.push(HeaderItem {
+            name: SharedString::from(clean_name),
+            value: SharedString::from(clean_val),
+            is_sensitive,
+            is_truncated: is_name_truncated || is_val_truncated,
+        });
+    }
+
+    let notice = if omitted_count > 0 {
+        format!("[+{} headers omitted by UI budget]", omitted_count)
+    } else {
+        String::new()
+    };
+
+    ProjectedHeadersResult {
+        items,
+        omitted_count,
+        notice,
+    }
+}
+
+/// Formats headers into a reconstructed text block bounded to `MAX_HEADERS_TEXT_BUDGET` (64 KiB).
+/// Applies identical masking for sensitive headers when `reveal_secrets` is `false`.
+pub fn project_headers_text(
+    headers: &[kaska_http::models::HttpHeader],
+    reveal_secrets: bool,
+) -> String {
+    let mut out = String::new();
+    let mut truncated = false;
+
+    for h in headers {
+        let is_sensitive = is_sensitive_header(&h.name);
+        let val = if is_sensitive && !reveal_secrets {
+            MASKED_SECRET_PLACEHOLDER
+        } else {
+            &h.value
+        };
+
+        let line = format!("{}: {}\n", h.name, val);
+        if out.len() + line.len() > MAX_HEADERS_TEXT_BUDGET.saturating_sub(64) {
+            truncated = true;
+            break;
+        }
+        out.push_str(&line);
+    }
+
+    if truncated {
+        out.push_str("\n[Headers text truncated at 64 KiB budget]");
+    }
+
+    out
+}
+
+/// Reconstructs the Request line from parsed fields: `<METHOD> <PATH_AND_QUERY> <VERSION>`.
+pub fn format_reconstructed_request_line(req: &kaska_http::models::HttpRequest) -> String {
+    let target = if req.query.is_empty() {
+        if req.path.is_empty() {
+            "/".to_string()
+        } else {
+            req.path.clone()
+        }
+    } else {
+        format!("{}?{}", req.path, req.query)
+    };
+    let clean_target = sanitize_display_text(floor_utf8_char_boundary_str(&target, 512));
+    let version = if req.http_version.is_empty() {
+        "[unknown HTTP version]"
+    } else {
+        &req.http_version
+    };
+    format!("{} {} {}", req.method, clean_target, version)
+}
+
+/// Reconstructs the Response status line from parsed fields: `<VERSION> <CODE> <REASON>`.
+pub fn format_reconstructed_status_line(resp: &kaska_http::models::HttpResponse) -> String {
+    let version = if resp.http_version.is_empty() {
+        "[unknown HTTP version]"
+    } else {
+        &resp.http_version
+    };
+    let clean_reason = sanitize_display_text(floor_utf8_char_boundary_str(&resp.status_text, 128));
+    format!("{} {} {}", version, resp.status_code, clean_reason)
+}
+
 /// Sets details on AppWindow from an optional HttpTransaction reference or clears them.
-pub fn set_transaction_details_on_ui(ui: &AppWindow, tx_opt: Option<&HttpTransaction>) {
+///
+/// Respects the `secrets_revealed` flag exclusively for the currently active transaction.
+pub fn set_transaction_details_on_ui(
+    ui: &AppWindow,
+    tx_opt: Option<&HttpTransaction>,
+    secrets_revealed: bool,
+) {
+    ui.set_secrets_revealed(secrets_revealed);
+
     if let Some(tx) = tx_opt {
-        ui.set_active_req_headers(SharedString::from(tx.request.headers_raw_text()));
+        // 1. Request details
+        ui.set_active_req_line(SharedString::from(format_reconstructed_request_line(
+            &tx.request,
+        )));
+        let req_text = project_headers_text(&tx.request.headers, secrets_revealed);
+        ui.set_active_req_headers(SharedString::from(req_text));
+
+        let req_headers_proj = project_headers_to_slint(&tx.request.headers, secrets_revealed);
+        ui.set_active_req_headers_list(ModelRc::new(VecModel::from(req_headers_proj.items)));
+        ui.set_active_req_headers_omitted(SharedString::from(req_headers_proj.notice));
+
         let req_preview = inspector_details::format_request_body_preview(&tx.request);
         ui.set_active_req_body(SharedString::from(req_preview.text));
+        ui.set_active_req_is_binary(req_preview.is_binary);
+        ui.set_active_req_body_truncated(req_preview.preview_truncated);
 
+        // 2. Response details
         if let Some(resp) = &tx.response {
-            ui.set_active_resp_headers(SharedString::from(resp.headers_raw_text()));
+            ui.set_active_resp_status_line(SharedString::from(format_reconstructed_status_line(
+                resp,
+            )));
+            let resp_text = project_headers_text(&resp.headers, secrets_revealed);
+            ui.set_active_resp_headers(SharedString::from(resp_text));
+
+            let resp_headers_proj = project_headers_to_slint(&resp.headers, secrets_revealed);
+            ui.set_active_resp_headers_list(ModelRc::new(VecModel::from(resp_headers_proj.items)));
+            ui.set_active_resp_headers_omitted(SharedString::from(resp_headers_proj.notice));
+
             let resp_preview = inspector_details::format_response_body_preview(resp);
             ui.set_active_resp_body(SharedString::from(resp_preview.text));
+            ui.set_active_resp_is_binary(resp_preview.is_binary);
+            ui.set_active_resp_body_truncated(resp_preview.preview_truncated);
+
             ui.set_active_timing_text(SharedString::from(format!(
                 "Status {} • Duration: {} ms",
                 resp.status_code, tx.duration_ms
             )));
         } else {
+            ui.set_active_resp_status_line(SharedString::from(""));
             ui.set_active_resp_headers(SharedString::from("(No response)"));
+            ui.set_active_resp_headers_list(ModelRc::new(VecModel::from(Vec::<HeaderItem>::new())));
+            ui.set_active_resp_headers_omitted(SharedString::from(""));
             ui.set_active_resp_body(SharedString::from(""));
+            ui.set_active_resp_is_binary(false);
+            ui.set_active_resp_body_truncated(false);
+
             let outcome_str = match &tx.state {
-                kaska_http::models::TransactionState::Pending => "Pending",
-                kaska_http::models::TransactionState::Failed(_) => "Failed",
-                kaska_http::models::TransactionState::Completed => "No response",
+                kaska_http::models::TransactionState::Pending => "Status: Pending (In flight)...",
+                kaska_http::models::TransactionState::Failed(_) => {
+                    ui.set_active_resp_body(SharedString::from(
+                        "Transaction failed: No response received from remote server.",
+                    ));
+                    "Status: Failed"
+                }
+                kaska_http::models::TransactionState::Completed => {
+                    "Status: Completed (No response)"
+                }
             };
             ui.set_active_timing_text(SharedString::from(outcome_str));
         }
     } else {
+        // Clear all details
+        ui.set_active_req_line(SharedString::from(""));
         ui.set_active_req_headers(SharedString::from(""));
+        ui.set_active_req_headers_list(ModelRc::new(VecModel::from(Vec::<HeaderItem>::new())));
+        ui.set_active_req_headers_omitted(SharedString::from(""));
         ui.set_active_req_body(SharedString::from(""));
+        ui.set_active_req_is_binary(false);
+        ui.set_active_req_body_truncated(false);
+
+        ui.set_active_resp_status_line(SharedString::from(""));
         ui.set_active_resp_headers(SharedString::from(""));
+        ui.set_active_resp_headers_list(ModelRc::new(VecModel::from(Vec::<HeaderItem>::new())));
+        ui.set_active_resp_headers_omitted(SharedString::from(""));
         ui.set_active_resp_body(SharedString::from(""));
+        ui.set_active_resp_is_binary(false);
+        ui.set_active_resp_body_truncated(false);
+
         ui.set_active_timing_text(SharedString::from(""));
     }
 }
@@ -128,6 +368,7 @@ pub fn refresh_traffic_ui(
     scope: &AuditScope,
     filter: &FilterState,
     selected_id: &mut Option<u64>,
+    secrets_revealed: &mut bool,
     status_suffix: Option<String>,
 ) {
     // 1. Take snapshot of metadata and release lock immediately
@@ -139,6 +380,7 @@ pub fn refresh_traffic_ui(
 
     if !selection_retained {
         *selected_id = None;
+        *secrets_revealed = false;
     }
 
     // 3. If selected_id exists, look up single transaction
@@ -155,7 +397,13 @@ pub fn refresh_traffic_ui(
     ui.set_selected_transaction_idx(new_idx);
     ui.set_transactions(ModelRc::new(VecModel::from(items)));
 
-    set_transaction_details_on_ui(ui, selected_tx.as_ref());
+    let reveal_flag = if selected_tx.is_some() {
+        *secrets_revealed
+    } else {
+        *secrets_revealed = false;
+        false
+    };
+    set_transaction_details_on_ui(ui, selected_tx.as_ref(), reveal_flag);
 
     if let Some(suffix) = status_suffix {
         ui.set_status_message(SharedString::from(format!(
@@ -372,9 +620,12 @@ impl AppController {
             *guard = Some(test_server);
         }
 
-        // Shared filter state and selected ID for Inspector projection
+        // Shared filter state, selected ID and secrets revealed flag for Inspector projection
         let filter_state = Arc::new(Mutex::new(FilterState::default()));
         let selected_id = Arc::new(Mutex::new(None::<u64>));
+        let secrets_revealed = Arc::new(Mutex::new(false));
+
+        app.set_secrets_revealed(false);
 
         // Initialize default Filter Bar values on AppWindow
         app.set_filter_search(SharedString::from(""));
@@ -388,8 +639,9 @@ impl AppController {
         // Initial projection of store contents
         {
             let mut sel = selected_id.lock().unwrap();
+            let mut sec = secrets_revealed.lock().unwrap();
             let f = filter_state.lock().unwrap().clone();
-            refresh_traffic_ui(app, &self.store, &self.scope, &f, &mut sel, None);
+            refresh_traffic_ui(app, &self.store, &self.scope, &f, &mut sel, &mut sec, None);
         }
 
         // Start native capturing proxy server
@@ -398,6 +650,7 @@ impl AppController {
         let scope_ref = Arc::clone(&self.scope);
         let filter_clone = Arc::clone(&filter_state);
         let selected_clone = Arc::clone(&selected_id);
+        let secrets_clone = Arc::clone(&secrets_revealed);
 
         let make_on_tx_callback = {
             let app_weak = app_weak.clone();
@@ -405,6 +658,7 @@ impl AppController {
             let scope_ref = Arc::clone(&scope_ref);
             let filter_clone = Arc::clone(&filter_clone);
             let selected_clone = Arc::clone(&selected_clone);
+            let secrets_clone = Arc::clone(&secrets_clone);
 
             move || {
                 let app_weak_inner = app_weak.clone();
@@ -412,6 +666,7 @@ impl AppController {
                 let scope_inner = Arc::clone(&scope_ref);
                 let filter_inner = Arc::clone(&filter_clone);
                 let selected_inner = Arc::clone(&selected_clone);
+                let secrets_inner = Arc::clone(&secrets_clone);
 
                 Arc::new(move |tx: HttpTransaction| {
                     let app_weak_deep = app_weak_inner.clone();
@@ -419,11 +674,13 @@ impl AppController {
                     let scope_deep = Arc::clone(&scope_inner);
                     let filter_deep = Arc::clone(&filter_inner);
                     let selected_deep = Arc::clone(&selected_inner);
+                    let secrets_deep = Arc::clone(&secrets_inner);
 
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = app_weak_deep.upgrade() {
                             let filter = filter_deep.lock().unwrap().clone();
                             let mut sel_id = selected_deep.lock().unwrap();
+                            let mut sec_rev = secrets_deep.lock().unwrap();
                             let suffix = format!("Last: {} {}", tx.request.method, tx.request.path);
                             refresh_traffic_ui(
                                 &ui,
@@ -431,6 +688,7 @@ impl AppController {
                                 &scope_deep,
                                 &filter,
                                 &mut sel_id,
+                                &mut sec_rev,
                                 Some(suffix),
                             );
                         }
@@ -528,9 +786,15 @@ impl AppController {
         let scope_select = Arc::clone(&self.scope);
         let filter_select = Arc::clone(&filter_state);
         let selected_select = Arc::clone(&selected_id);
+        let secrets_select = Arc::clone(&secrets_revealed);
 
         app.on_select_transaction(move |row_idx: i32| {
             if let Some(ui) = app_weak.upgrade() {
+                // Reset privacy state upon selection change
+                {
+                    let mut s = secrets_select.lock().unwrap();
+                    *s = false;
+                }
                 let filter = filter_select.lock().unwrap().clone();
                 let summaries = store_select.lock().unwrap().get_metadata_snapshot();
                 let matching = filter.filter(&summaries, &scope_select);
@@ -542,7 +806,7 @@ impl AppController {
                     // Look up full transaction for details
                     let tx_opt = store_select.lock().unwrap().get_by_id(target_id).cloned();
                     ui.set_selected_transaction_idx(row_idx);
-                    set_transaction_details_on_ui(&ui, tx_opt.as_ref());
+                    set_transaction_details_on_ui(&ui, tx_opt.as_ref(), false);
                 }
             }
         });
@@ -553,9 +817,15 @@ impl AppController {
         let scope_select_id = Arc::clone(&self.scope);
         let filter_select_id = Arc::clone(&filter_state);
         let selected_select_id = Arc::clone(&selected_id);
+        let secrets_select_id = Arc::clone(&secrets_revealed);
 
         app.on_select_transaction_by_id(move |id_str: SharedString| {
             if let Some(ui) = app_weak.upgrade() {
+                // Reset privacy state upon selection change
+                {
+                    let mut s = secrets_select_id.lock().unwrap();
+                    *s = false;
+                }
                 if let Ok(id) = id_str.as_str().parse::<u64>() {
                     let filter = filter_select_id.lock().unwrap().clone();
                     let summaries = store_select_id.lock().unwrap().get_metadata_snapshot();
@@ -568,17 +838,38 @@ impl AppController {
 
                         let tx_opt = store_select_id.lock().unwrap().get_by_id(id).cloned();
                         ui.set_selected_transaction_idx(pos as i32);
-                        set_transaction_details_on_ui(&ui, tx_opt.as_ref());
+                        set_transaction_details_on_ui(&ui, tx_opt.as_ref(), false);
                     } else {
                         // Not in current projection: reject stale selection
                         let mut sel_guard = selected_select_id.lock().unwrap();
                         if *sel_guard == Some(id) {
                             *sel_guard = None;
                             ui.set_selected_transaction_idx(-1);
-                            set_transaction_details_on_ui(&ui, None);
+                            set_transaction_details_on_ui(&ui, None, false);
                         }
                     }
                 }
+            }
+        });
+
+        // 3c. Toggle Reveal Secrets Callback
+        let app_weak = app.as_weak();
+        let store_reveal = Arc::clone(&self.store);
+        let selected_reveal = Arc::clone(&selected_id);
+        let secrets_reveal = Arc::clone(&secrets_revealed);
+
+        app.on_toggle_reveal_secrets(move || {
+            if let Some(ui) = app_weak.upgrade() {
+                let sel_id = *selected_reveal.lock().unwrap();
+                let new_state = {
+                    let mut s = secrets_reveal.lock().unwrap();
+                    *s = !*s;
+                    *s
+                };
+
+                let tx_opt =
+                    sel_id.and_then(|id| store_reveal.lock().unwrap().get_by_id(id).cloned());
+                set_transaction_details_on_ui(&ui, tx_opt.as_ref(), new_state);
             }
         });
 
@@ -588,11 +879,14 @@ impl AppController {
         let filter_clear = Arc::clone(&filter_state);
         let selected_clear = Arc::clone(&selected_id);
         let scope_clear = Arc::clone(&self.scope);
+        let secrets_clear = Arc::clone(&secrets_revealed);
 
         app.on_clear_history(move || {
             store_clear.lock().unwrap().clear();
             let mut sel_guard = selected_clear.lock().unwrap();
             *sel_guard = None;
+            let mut sec_guard = secrets_clear.lock().unwrap();
+            *sec_guard = false;
 
             if let Some(ui) = app_weak.upgrade() {
                 let filter = filter_clear.lock().unwrap().clone();
@@ -602,6 +896,7 @@ impl AppController {
                     &scope_clear,
                     &filter,
                     &mut sel_guard,
+                    &mut sec_guard,
                     None,
                 );
                 ui.set_status_message(SharedString::from("History cleared"));
@@ -615,6 +910,7 @@ impl AppController {
         let scope_f = Arc::clone(&self.scope);
         let filter_f = Arc::clone(&filter_state);
         let selected_f = Arc::clone(&selected_id);
+        let secrets_f = Arc::clone(&secrets_revealed);
         app.on_filter_search_changed(move |query: SharedString| {
             if let Some(ui) = app_weak.upgrade() {
                 {
@@ -623,7 +919,16 @@ impl AppController {
                 }
                 let f_snapshot = filter_f.lock().unwrap().clone();
                 let mut sel_id = selected_f.lock().unwrap();
-                refresh_traffic_ui(&ui, &store_f, &scope_f, &f_snapshot, &mut sel_id, None);
+                let mut sec_rev = secrets_f.lock().unwrap();
+                refresh_traffic_ui(
+                    &ui,
+                    &store_f,
+                    &scope_f,
+                    &f_snapshot,
+                    &mut sel_id,
+                    &mut sec_rev,
+                    None,
+                );
             }
         });
 
@@ -633,6 +938,7 @@ impl AppController {
         let scope_f = Arc::clone(&self.scope);
         let filter_f = Arc::clone(&filter_state);
         let selected_f = Arc::clone(&selected_id);
+        let secrets_f = Arc::clone(&secrets_revealed);
         app.on_filter_method_changed(move |idx: i32| {
             if let Some(ui) = app_weak.upgrade() {
                 {
@@ -652,7 +958,16 @@ impl AppController {
                 }
                 let f_snapshot = filter_f.lock().unwrap().clone();
                 let mut sel_id = selected_f.lock().unwrap();
-                refresh_traffic_ui(&ui, &store_f, &scope_f, &f_snapshot, &mut sel_id, None);
+                let mut sec_rev = secrets_f.lock().unwrap();
+                refresh_traffic_ui(
+                    &ui,
+                    &store_f,
+                    &scope_f,
+                    &f_snapshot,
+                    &mut sel_id,
+                    &mut sec_rev,
+                    None,
+                );
             }
         });
 
@@ -662,6 +977,7 @@ impl AppController {
         let scope_f = Arc::clone(&self.scope);
         let filter_f = Arc::clone(&filter_state);
         let selected_f = Arc::clone(&selected_id);
+        let secrets_f = Arc::clone(&secrets_revealed);
         app.on_filter_status_changed(move |idx: i32| {
             if let Some(ui) = app_weak.upgrade() {
                 {
@@ -678,7 +994,16 @@ impl AppController {
                 }
                 let f_snapshot = filter_f.lock().unwrap().clone();
                 let mut sel_id = selected_f.lock().unwrap();
-                refresh_traffic_ui(&ui, &store_f, &scope_f, &f_snapshot, &mut sel_id, None);
+                let mut sec_rev = secrets_f.lock().unwrap();
+                refresh_traffic_ui(
+                    &ui,
+                    &store_f,
+                    &scope_f,
+                    &f_snapshot,
+                    &mut sel_id,
+                    &mut sec_rev,
+                    None,
+                );
             }
         });
 
@@ -688,6 +1013,7 @@ impl AppController {
         let scope_f = Arc::clone(&self.scope);
         let filter_f = Arc::clone(&filter_state);
         let selected_f = Arc::clone(&selected_id);
+        let secrets_f = Arc::clone(&secrets_revealed);
         app.on_filter_outcome_changed(move |idx: i32| {
             if let Some(ui) = app_weak.upgrade() {
                 {
@@ -701,7 +1027,16 @@ impl AppController {
                 }
                 let f_snapshot = filter_f.lock().unwrap().clone();
                 let mut sel_id = selected_f.lock().unwrap();
-                refresh_traffic_ui(&ui, &store_f, &scope_f, &f_snapshot, &mut sel_id, None);
+                let mut sec_rev = secrets_f.lock().unwrap();
+                refresh_traffic_ui(
+                    &ui,
+                    &store_f,
+                    &scope_f,
+                    &f_snapshot,
+                    &mut sel_id,
+                    &mut sec_rev,
+                    None,
+                );
             }
         });
 
@@ -711,6 +1046,7 @@ impl AppController {
         let scope_f = Arc::clone(&self.scope);
         let filter_f = Arc::clone(&filter_state);
         let selected_f = Arc::clone(&selected_id);
+        let secrets_f = Arc::clone(&secrets_revealed);
         app.on_filter_only_in_scope_changed(move |val: bool| {
             if let Some(ui) = app_weak.upgrade() {
                 {
@@ -719,7 +1055,16 @@ impl AppController {
                 }
                 let f_snapshot = filter_f.lock().unwrap().clone();
                 let mut sel_id = selected_f.lock().unwrap();
-                refresh_traffic_ui(&ui, &store_f, &scope_f, &f_snapshot, &mut sel_id, None);
+                let mut sec_rev = secrets_f.lock().unwrap();
+                refresh_traffic_ui(
+                    &ui,
+                    &store_f,
+                    &scope_f,
+                    &f_snapshot,
+                    &mut sel_id,
+                    &mut sec_rev,
+                    None,
+                );
             }
         });
 
@@ -729,6 +1074,7 @@ impl AppController {
         let scope_f = Arc::clone(&self.scope);
         let filter_f = Arc::clone(&filter_state);
         let selected_f = Arc::clone(&selected_id);
+        let secrets_f = Arc::clone(&secrets_revealed);
         app.on_filter_hide_connect_changed(move |val: bool| {
             if let Some(ui) = app_weak.upgrade() {
                 {
@@ -737,7 +1083,16 @@ impl AppController {
                 }
                 let f_snapshot = filter_f.lock().unwrap().clone();
                 let mut sel_id = selected_f.lock().unwrap();
-                refresh_traffic_ui(&ui, &store_f, &scope_f, &f_snapshot, &mut sel_id, None);
+                let mut sec_rev = secrets_f.lock().unwrap();
+                refresh_traffic_ui(
+                    &ui,
+                    &store_f,
+                    &scope_f,
+                    &f_snapshot,
+                    &mut sel_id,
+                    &mut sec_rev,
+                    None,
+                );
             }
         });
 
@@ -747,6 +1102,7 @@ impl AppController {
         let scope_f = Arc::clone(&self.scope);
         let filter_f = Arc::clone(&filter_state);
         let selected_f = Arc::clone(&selected_id);
+        let secrets_f = Arc::clone(&secrets_revealed);
         app.on_filter_hide_failed_changed(move |val: bool| {
             if let Some(ui) = app_weak.upgrade() {
                 {
@@ -755,7 +1111,16 @@ impl AppController {
                 }
                 let f_snapshot = filter_f.lock().unwrap().clone();
                 let mut sel_id = selected_f.lock().unwrap();
-                refresh_traffic_ui(&ui, &store_f, &scope_f, &f_snapshot, &mut sel_id, None);
+                let mut sec_rev = secrets_f.lock().unwrap();
+                refresh_traffic_ui(
+                    &ui,
+                    &store_f,
+                    &scope_f,
+                    &f_snapshot,
+                    &mut sel_id,
+                    &mut sec_rev,
+                    None,
+                );
             }
         });
 
@@ -765,6 +1130,7 @@ impl AppController {
         let scope_f = Arc::clone(&self.scope);
         let filter_f = Arc::clone(&filter_state);
         let selected_f = Arc::clone(&selected_id);
+        let secrets_f = Arc::clone(&secrets_revealed);
         app.on_reset_filters(move || {
             if let Some(ui) = app_weak.upgrade() {
                 {
@@ -782,7 +1148,16 @@ impl AppController {
 
                 let f_snapshot = filter_f.lock().unwrap().clone();
                 let mut sel_id = selected_f.lock().unwrap();
-                refresh_traffic_ui(&ui, &store_f, &scope_f, &f_snapshot, &mut sel_id, None);
+                let mut sec_rev = secrets_f.lock().unwrap();
+                refresh_traffic_ui(
+                    &ui,
+                    &store_f,
+                    &scope_f,
+                    &f_snapshot,
+                    &mut sel_id,
+                    &mut sec_rev,
+                    None,
+                );
             }
         });
 
@@ -1940,5 +2315,369 @@ mod tests {
         assert_eq!(item_404.status_code, 404);
         assert_eq!(item_404.status_text.as_str(), "OK");
         assert!(item_404.is_error);
+    }
+
+    // 19. Tests for Header Projection & UI Budgets (Gate 1.4B-2)
+    #[test]
+    fn test_header_projection_empty() {
+        let headers = vec![];
+        let res = project_headers_to_slint(&headers, false);
+        assert!(res.items.is_empty());
+        assert_eq!(res.omitted_count, 0);
+        assert_eq!(res.notice, "");
+
+        let text = project_headers_text(&headers, false);
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn test_header_projection_preserves_order_and_duplicates() {
+        use kaska_http::models::HttpHeader;
+        let headers = vec![
+            HttpHeader::new("Set-Cookie", "a=1"),
+            HttpHeader::new("X-Custom", "val1"),
+            HttpHeader::new("Set-Cookie", "b=2"),
+            HttpHeader::new("x-custom", "val2"),
+        ];
+
+        let res = project_headers_to_slint(&headers, true);
+        assert_eq!(res.items.len(), 4);
+        assert_eq!(res.items[0].name.as_str(), "Set-Cookie");
+        assert_eq!(res.items[0].value.as_str(), "a=1");
+        assert!(res.items[0].is_sensitive);
+
+        assert_eq!(res.items[1].name.as_str(), "X-Custom");
+        assert_eq!(res.items[1].value.as_str(), "val1");
+        assert!(!res.items[1].is_sensitive);
+
+        assert_eq!(res.items[2].name.as_str(), "Set-Cookie");
+        assert_eq!(res.items[2].value.as_str(), "b=2");
+        assert!(res.items[2].is_sensitive);
+
+        assert_eq!(res.items[3].name.as_str(), "x-custom");
+        assert_eq!(res.items[3].value.as_str(), "val2");
+        assert!(!res.items[3].is_sensitive);
+    }
+
+    #[test]
+    fn test_header_privacy_masking_and_reveal() {
+        use kaska_http::models::HttpHeader;
+        let sensitive_names = [
+            "Authorization",
+            "authorization",
+            "AUTHORIZATION",
+            "Proxy-Authorization",
+            "Cookie",
+            "cookie",
+            "Set-Cookie",
+            "X-Api-Key",
+            "x-api-key",
+            "Api-Key",
+            "api-key",
+        ];
+
+        let headers: Vec<HttpHeader> = sensitive_names
+            .iter()
+            .map(|name| HttpHeader::new(*name, "secret_value_12345"))
+            .collect();
+
+        // 1. Masked by default
+        let masked_res = project_headers_to_slint(&headers, false);
+        for item in &masked_res.items {
+            assert!(item.is_sensitive);
+            assert_eq!(item.value.as_str(), MASKED_SECRET_PLACEHOLDER);
+        }
+        let masked_text = project_headers_text(&headers, false);
+        assert!(!masked_text.contains("secret_value_12345"));
+        assert!(masked_text.contains(MASKED_SECRET_PLACEHOLDER));
+
+        // 2. Revealed explicitly
+        let revealed_res = project_headers_to_slint(&headers, true);
+        for item in &revealed_res.items {
+            assert!(item.is_sensitive);
+            assert_eq!(item.value.as_str(), "secret_value_12345");
+        }
+        let revealed_text = project_headers_text(&headers, true);
+        assert!(revealed_text.contains("secret_value_12345"));
+        assert!(!revealed_text.contains(MASKED_SECRET_PLACEHOLDER));
+    }
+
+    #[test]
+    fn test_header_projection_max_count_budget() {
+        use kaska_http::models::HttpHeader;
+        let mut headers = Vec::new();
+        for i in 0..300 {
+            headers.push(HttpHeader::new(format!("X-Header-{}", i), "value"));
+        }
+
+        let res = project_headers_to_slint(&headers, false);
+        assert_eq!(res.items.len(), MAX_VISIBLE_HEADERS); // 256
+        assert_eq!(res.omitted_count, 44);
+        assert_eq!(res.notice, "[+44 headers omitted by UI budget]");
+    }
+
+    #[test]
+    fn test_header_projection_truncates_large_fields_safely() {
+        use kaska_http::models::HttpHeader;
+        let large_name = "A".repeat(500); // Exceeds 256
+        let large_val = "B".repeat(2000); // Exceeds 1024
+        let headers = vec![HttpHeader::new(large_name, large_val)];
+
+        let res = project_headers_to_slint(&headers, false);
+        assert_eq!(res.items.len(), 1);
+        let item = &res.items[0];
+        assert_eq!(item.name.len(), MAX_HEADER_NAME_BYTES);
+        assert_eq!(item.value.len(), MAX_HEADER_VALUE_BYTES);
+        assert!(item.is_truncated);
+    }
+
+    #[test]
+    fn test_header_utf8_multibyte_boundary_truncation() {
+        use kaska_http::models::HttpHeader;
+        // Emoji '🦀' is 4 bytes: 0xF0 0x9F 0xA6 0x80
+        // Fill string with 'a' and end with '🦀' around boundary 256
+        let mut name = "a".repeat(254);
+        name.push('🦀'); // 254 + 4 = 258 bytes
+        let headers = vec![HttpHeader::new(name, "val")];
+
+        let res = project_headers_to_slint(&headers, false);
+        assert_eq!(res.items.len(), 1);
+        let item = &res.items[0];
+        // Slice must not cut 🦀 in half, so it cuts at 254 bytes
+        assert_eq!(item.name.len(), 254);
+        assert!(item.is_truncated);
+    }
+
+    #[test]
+    fn test_sanitize_display_text_replaces_control_characters() {
+        let dirty = "Header\r\nValue\x00With\x1bControl\x7fChars";
+        let clean = sanitize_display_text(dirty);
+        assert_eq!(clean, "Header  Value With Control Chars");
+    }
+
+    #[test]
+    fn test_reconstructed_request_line() {
+        use kaska_http::models::{HttpMethod, HttpRequest};
+        let req1 = HttpRequest {
+            method: HttpMethod::Get,
+            raw_url: "/api/status?verbose=true".to_string(),
+            host: "127.0.0.1".to_string(),
+            path: "/api/status".to_string(),
+            query: "verbose=true".to_string(),
+            http_version: "HTTP/1.1".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+        assert_eq!(
+            format_reconstructed_request_line(&req1),
+            "GET /api/status?verbose=true HTTP/1.1"
+        );
+
+        let req2 = HttpRequest {
+            method: HttpMethod::Post,
+            raw_url: "/upload".to_string(),
+            host: "127.0.0.1".to_string(),
+            path: "/upload".to_string(),
+            query: "".to_string(),
+            http_version: "HTTP/1.0".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+        assert_eq!(
+            format_reconstructed_request_line(&req2),
+            "POST /upload HTTP/1.0"
+        );
+
+        let req3 = HttpRequest {
+            method: HttpMethod::Custom("CUSTOM".to_string()),
+            raw_url: "/custom".to_string(),
+            host: "127.0.0.1".to_string(),
+            path: "".to_string(),
+            query: "".to_string(),
+            http_version: "".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+        assert_eq!(
+            format_reconstructed_request_line(&req3),
+            "CUSTOM / [unknown HTTP version]"
+        );
+    }
+
+    #[test]
+    fn test_reconstructed_status_line() {
+        use kaska_http::models::HttpResponse;
+        let resp = HttpResponse {
+            status_code: 200,
+            status_text: "OK".to_string(),
+            http_version: "HTTP/1.1".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+        assert_eq!(format_reconstructed_status_line(&resp), "HTTP/1.1 200 OK");
+
+        let resp404 = HttpResponse {
+            status_code: 404,
+            status_text: "Not Found".to_string(),
+            http_version: "".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+        assert_eq!(
+            format_reconstructed_status_line(&resp404),
+            "[unknown HTTP version] 404 Not Found"
+        );
+
+        let resp_empty_reason = HttpResponse {
+            status_code: 204,
+            status_text: "".to_string(),
+            http_version: "HTTP/2.0".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+        assert_eq!(
+            format_reconstructed_status_line(&resp_empty_reason),
+            "HTTP/2.0 204 "
+        );
+    }
+
+    #[test]
+    fn test_ui_privacy_and_safe_error_integration() {
+        use kaska_http::models::{
+            HttpHeader, HttpMethod, HttpRequest, HttpResponse, HttpTransaction, TransactionState,
+        };
+        let app = AppWindow::new().unwrap();
+
+        // 1. Synthetic failed transaction containing secrets, URLs, and OS error traces
+        let dirty_tx = HttpTransaction {
+            id: 101,
+            request: HttpRequest {
+                method: HttpMethod::Post,
+                raw_url: "/login?token=super_secret_query_token".to_string(),
+                host: "internal.corp.local:8080".to_string(),
+                path: "/login".to_string(),
+                query: "token=super_secret_query_token".to_string(),
+                http_version: "HTTP/1.1".to_string(),
+                headers: vec![],
+                body: vec![],
+            },
+            response: None,
+            duration_ms: 15,
+            state: TransactionState::Failed(
+                "Connection refused: Authorization: Bearer secret_token_xyz Cookie: session=admin_abc http://internal.local:9000/api?priv=true \x00\x1b[31mError".to_string(),
+            ),
+            timestamp_rfc3339: "2026-10-19T00:00:00Z".to_string(),
+        };
+
+        set_transaction_details_on_ui(&app, Some(&dirty_tx), false);
+
+        let resp_body = app.get_active_resp_body().to_string();
+        let timing_text = app.get_active_timing_text().to_string();
+
+        // Verify the response body contains ONLY the safe static message
+        assert_eq!(
+            resp_body,
+            "Transaction failed: No response received from remote server."
+        );
+        assert_eq!(timing_text, "Status: Failed");
+
+        // Verify absolutely zero leakage of sensitive data
+        assert!(!resp_body.contains("Authorization"));
+        assert!(!resp_body.contains("secret_token_xyz"));
+        assert!(!resp_body.contains("Cookie"));
+        assert!(!resp_body.contains("session=admin_abc"));
+        assert!(!resp_body.contains("internal.corp.local"));
+        assert!(!resp_body.contains("internal.local"));
+        assert!(!resp_body.contains("super_secret_query_token"));
+        assert!(!resp_body.contains("Connection refused"));
+        assert!(!resp_body.contains("\x1b"));
+
+        // 2. Privacy state synchronization and reset
+        let store = create_shared_store();
+        let scope = AuditScope::default();
+        let filter = FilterState::default();
+
+        let tx = HttpTransaction {
+            id: 1,
+            request: HttpRequest {
+                method: HttpMethod::Get,
+                raw_url: "/api".to_string(),
+                host: "127.0.0.1".to_string(),
+                path: "/api".to_string(),
+                query: "".to_string(),
+                http_version: "HTTP/1.1".to_string(),
+                headers: vec![HttpHeader::new("Authorization", "Bearer secret_jwt_token")],
+                body: vec![],
+            },
+            response: Some(HttpResponse {
+                status_code: 200,
+                status_text: "OK".to_string(),
+                http_version: "HTTP/1.1".to_string(),
+                headers: vec![HttpHeader::new("Set-Cookie", "session=admin_session_val")],
+                body: b"{}".to_vec(),
+            }),
+            duration_ms: 10,
+            state: TransactionState::Completed,
+            timestamp_rfc3339: "2026-10-19T00:00:00Z".to_string(),
+        };
+
+        store.lock().unwrap().insert(tx);
+
+        let mut selected_id = Some(1);
+        let mut secrets_revealed = false;
+
+        // 2a. Initial refresh with secrets_revealed = false: headers are masked
+        refresh_traffic_ui(
+            &app,
+            &store,
+            &scope,
+            &filter,
+            &mut selected_id,
+            &mut secrets_revealed,
+            None,
+        );
+        assert!(!app.get_secrets_revealed());
+        let req_headers = app.get_active_req_headers().to_string();
+        assert!(req_headers.contains(MASKED_SECRET_PLACEHOLDER));
+        assert!(!req_headers.contains("secret_jwt_token"));
+
+        // 2b. User reveals secrets: secrets_revealed = true
+        secrets_revealed = true;
+        set_transaction_details_on_ui(&app, store.lock().unwrap().get_by_id(1), secrets_revealed);
+        assert!(app.get_secrets_revealed());
+        let revealed_req_headers = app.get_active_req_headers().to_string();
+        assert!(revealed_req_headers.contains("secret_jwt_token"));
+        assert!(!revealed_req_headers.contains(MASKED_SECRET_PLACEHOLDER));
+
+        // 2c. Live update / refresh while selection is retained: user intent is preserved
+        refresh_traffic_ui(
+            &app,
+            &store,
+            &scope,
+            &filter,
+            &mut selected_id,
+            &mut secrets_revealed,
+            None,
+        );
+        assert!(secrets_revealed);
+        assert!(app.get_secrets_revealed());
+
+        // 2d. Selection lost (e.g. filtered out): secrets_revealed resets to false
+        let filter_hide = FilterState {
+            search_query: "non_existent_path".to_string(),
+            ..Default::default()
+        };
+        refresh_traffic_ui(
+            &app,
+            &store,
+            &scope,
+            &filter_hide,
+            &mut selected_id,
+            &mut secrets_revealed,
+            None,
+        );
+        assert_eq!(selected_id, None);
+        assert!(!secrets_revealed);
+        assert!(!app.get_secrets_revealed());
     }
 }

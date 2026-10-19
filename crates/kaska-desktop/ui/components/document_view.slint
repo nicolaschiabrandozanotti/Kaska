@@ -1,6 +1,7 @@
 import { ActionButton } from "action_button.slint";
-import { ScrollView } from "std-widgets.slint";
+import { ScrollView, ListView } from "std-widgets.slint";
 import { AppTheme } from "../styles/theme.slint";
+import { HeaderItem } from "traffic_types.slint";
 
 export component DocumentView inherits Rectangle {
     in property <string> text;
@@ -49,27 +50,116 @@ export component DocumentView inherits Rectangle {
     }
 }
 
+export component HeaderRowItem inherits Rectangle {
+    in property <HeaderItem> item;
+    height: 28px;
+    background: transparent;
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        spacing: 8px;
+        Text {
+            text: root.item.name + ":";
+            width: 140px;
+            font-family: AppTheme.mono-font;
+            font-size: 12px;
+            font-weight: 600;
+            color: root.item.is-sensitive ? AppTheme.border-focus : AppTheme.text-secondary;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.item.value;
+            horizontal-stretch: 1;
+            font-family: AppTheme.mono-font;
+            font-size: 12px;
+            color: root.item.is-sensitive ? AppTheme.text-primary : AppTheme.text-secondary;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        if root.item.is-sensitive: Rectangle {
+            width: 60px;
+            height: 18px;
+            background: AppTheme.bg-input;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: AppTheme.border-subtle;
+            Text {
+                text: "Secret";
+                font-size: 10px;
+                color: AppTheme.text-muted;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
 export component DocumentPanel inherits Rectangle {
     in property <string> title;
     in property <string> summary;
-    in property <string> headers;
-    in property <string> body;
-    in property <bool> has-selection;
+    in property <string> proto-line: "";
+    in property <[HeaderItem]> headers-list: [];
+    in property <string> headers-text: "";
+    in property <string> headers-omitted-notice: "";
+    in property <string> body: "";
+    in property <bool> is-binary: false;
+    in property <bool> preview-truncated: false;
+    in property <bool> has-selection: false;
     in-out property <bool> body-tab: false;
+    in-out property <bool> structured-headers: true;
+    in property <bool> secrets-revealed: false;
+    callback toggle-reveal-secrets();
+
     background: AppTheme.bg-card;
     border-color: AppTheme.border-subtle;
     border-width: 1px;
     border-radius: 4px;
     VerticalLayout {
         padding: 10px;
-        spacing: 8px;
+        spacing: 6px;
         HorizontalLayout {
             min-height: 24px;
-            Text { text: root.title; color: AppTheme.text-primary; font-size: 14px; font-weight: 600; }
-            Text { text: root.has-selection ? root.summary : ""; color: AppTheme.text-secondary; font-size: 12px; overflow: elide; horizontal-alignment: right; }
+            spacing: 8px;
+            Text { text: root.title; color: AppTheme.text-primary; font-size: 14px; font-weight: 600; vertical-alignment: center; }
+            if root.has-selection && root.summary != "": Text {
+                text: root.summary;
+                color: AppTheme.text-secondary;
+                font-size: 12px;
+                overflow: elide;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+            }
+        }
+        if root.has-selection && root.proto-line != "": Rectangle {
+            height: 24px;
+            background: AppTheme.bg-input;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: AppTheme.border-subtle;
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 6px;
+                Text {
+                    text: root.proto-line;
+                    font-family: AppTheme.mono-font;
+                    font-size: 12px;
+                    color: AppTheme.text-primary;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Text {
+                    text: "Reconstructed from parsed HTTP fields";
+                    font-size: 10px;
+                    color: AppTheme.text-muted;
+                    vertical-alignment: center;
+                }
+            }
         }
         FocusScope {
-            height: 32px;
+            height: 30px;
             focus-on-tab-navigation: false;
             accessible-role: tab-list;
             accessible-label: root.title + " sections";
@@ -82,13 +172,73 @@ export component DocumentPanel inherits Rectangle {
                 spacing: 6px;
                 headers-tab := ActionButton { text: "Headers"; selected: !root.body-tab; accessible-role: tab; accessible-item-selected: !root.body-tab; clicked => { root.body-tab = false; } }
                 body-tab := ActionButton { text: "Body"; selected: root.body-tab; accessible-role: tab; accessible-item-selected: root.body-tab; clicked => { root.body-tab = true; } }
+                if !root.body-tab && root.has-selection: ActionButton {
+                    text: root.structured-headers ? "View: Text" : "View: Table";
+                    description: root.structured-headers ? "Switch to text (reconstructed) headers" : "Switch to structured headers table";
+                    clicked => { root.structured-headers = !root.structured-headers; }
+                }
+                if !root.body-tab && root.has-selection: ActionButton {
+                    text: root.secrets-revealed ? "Hide Secrets" : "Reveal Secrets";
+                    description: root.secrets-revealed ? "Mask sensitive headers (Authorization, Cookies, API Keys)" : "Temporarily reveal sensitive header values for selected transaction";
+                    clicked => { root.toggle-reveal-secrets(); }
+                }
                 Rectangle { horizontal-stretch: 1; }
+                if root.body-tab && root.is-binary: Text {
+                    text: "Binary Hex Dump";
+                    font-size: 11px;
+                    color: AppTheme.text-muted;
+                    vertical-alignment: center;
+                }
+                if root.body-tab && root.preview-truncated: Text {
+                    text: "[Preview Truncated: 64 KiB]";
+                    font-size: 11px;
+                    color: AppTheme.text-muted;
+                    vertical-alignment: center;
+                }
+                if !root.body-tab && root.headers-omitted-notice != "": Text {
+                    text: root.headers-omitted-notice;
+                    font-size: 11px;
+                    color: AppTheme.text-muted;
+                    vertical-alignment: center;
+                }
             }
         }
-        DocumentView {
-            label: root.title + (root.body-tab ? " body" : " headers");
-            text: !root.has-selection ? "" : root.body-tab ? root.body : root.headers;
-            empty-text: !root.has-selection ? "Select a transaction to inspect it" : root.body-tab ? "Empty body" : "No headers available";
+        if !root.has-selection: DocumentView {
+            label: root.title;
+            text: "";
+            empty-text: "Select a transaction to inspect it";
+        }
+        if root.has-selection && root.body-tab: DocumentView {
+            label: root.title + " body";
+            text: root.body;
+            empty-text: "Empty body";
+        }
+        if root.has-selection && !root.body-tab && !root.structured-headers: DocumentView {
+            label: root.title + " headers text";
+            text: root.headers-text;
+            empty-text: "No headers available";
+        }
+        if root.has-selection && !root.body-tab && root.structured-headers: Rectangle {
+            background: AppTheme.bg-input;
+            border-color: AppTheme.border-subtle;
+            border-width: 1px;
+            border-radius: 4px;
+            if root.headers-list.length == 0: Text {
+                text: "No headers available";
+                font-size: 13px;
+                color: AppTheme.text-muted;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            if root.headers-list.length > 0: ListView {
+                x: 4px;
+                y: 4px;
+                width: parent.width - 8px;
+                height: parent.height - 8px;
+                for item in root.headers-list: HeaderRowItem {
+                    item: item;
+                }
+            }
         }
     }
 }

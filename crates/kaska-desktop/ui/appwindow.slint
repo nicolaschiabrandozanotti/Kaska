@@ -1,7 +1,7 @@
 import { Palette } from "std-widgets.slint";
 import { AppTheme } from "styles/theme.slint";
 export { AppTheme } from "styles/theme.slint";
-import { TrafficItem } from "components/traffic_types.slint";
+import { TrafficItem, HeaderItem } from "components/traffic_types.slint";
 import { Sidebar } from "components/sidebar.slint";
 import { Header } from "components/header.slint";
 import { StatusBar } from "components/status_bar.slint";
@@ -48,10 +48,21 @@ export component AppWindow inherits Window {
     in property <int> visible-transactions-count: 0;
     in-out property <int> selected-transaction-idx: -1;
     in property <string> active-req-headers: "";
+    in property <[HeaderItem]> active-req-headers-list: [];
+    in property <string> active-req-headers-omitted: "";
+    in property <string> active-req-line: "";
     in property <string> active-req-body: "";
+    in property <bool> active-req-is-binary: false;
+    in property <bool> active-req-body-truncated: false;
     in property <string> active-resp-headers: "";
+    in property <[HeaderItem]> active-resp-headers-list: [];
+    in property <string> active-resp-headers-omitted: "";
+    in property <string> active-resp-status-line: "";
     in property <string> active-resp-body: "";
+    in property <bool> active-resp-is-binary: false;
+    in property <bool> active-resp-body-truncated: false;
     in property <string> active-timing-text: "";
+    in property <bool> secrets-revealed: false;
 
     // Status bar & environment
     in property <string> status-message: "Proxy listening on 127.0.0.1:8080";
@@ -99,6 +110,7 @@ export component AppWindow inherits Window {
     callback filter-hide-connect-changed(bool);
     callback filter-hide-failed-changed(bool);
     callback reset-filters();
+    callback toggle-reveal-secrets();
     callback send-repeater();
     callback cancel-repeater();
     callback reset-repeater-defaults();
@@ -160,10 +172,22 @@ export component AppWindow inherits Window {
                         visible-count: root.visible-transactions-count;
                         selected-index <=> root.selected-transaction-idx;
                         active-req-headers: root.active-req-headers;
+                        active-req-headers-list: root.active-req-headers-list;
+                        active-req-headers-omitted: root.active-req-headers-omitted;
+                        active-req-line: root.active-req-line;
                         active-req-body: root.active-req-body;
+                        active-req-is-binary: root.active-req-is-binary;
+                        active-req-body-truncated: root.active-req-body-truncated;
                         active-resp-headers: root.active-resp-headers;
+                        active-resp-headers-list: root.active-resp-headers-list;
+                        active-resp-headers-omitted: root.active-resp-headers-omitted;
+                        active-resp-status-line: root.active-resp-status-line;
                         active-resp-body: root.active-resp-body;
+                        active-resp-is-binary: root.active-resp-is-binary;
+                        active-resp-body-truncated: root.active-resp-body-truncated;
                         active-timing-text: root.active-timing-text;
+                        secrets-revealed: root.secrets-revealed;
+                        toggle-reveal-secrets => { root.toggle-reveal-secrets(); }
                         filter-search <=> root.filter-search;
                         filter-method-idx <=> root.filter-method-idx;
                         filter-status-idx <=> root.filter-status-idx;
