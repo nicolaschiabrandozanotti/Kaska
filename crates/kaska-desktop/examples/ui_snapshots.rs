@@ -409,10 +409,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 assert_eq!(app.get_selected_transaction_idx(), 0);
                 assert!(!app.get_active_req_headers().is_empty());
                 assert!(!app.get_active_resp_headers().is_empty());
+                assert!(!app.get_secrets_revealed(), "Selected transaction defaults to masked");
+
+                // Live controller toggle reveal secrets on selected transaction
+                app.invoke_toggle_reveal_secrets();
+                assert!(app.get_secrets_revealed(), "Toggle reveals secrets on live controller");
+                app.invoke_toggle_reveal_secrets();
+                assert!(!app.get_secrets_revealed(), "Toggle again re-masks secrets on live controller");
 
                 // Keyboard selection navigation to Row 1 (POST /api/echo)
                 key(app.window(), slint::platform::Key::DownArrow);
                 assert_eq!(app.get_selected_transaction_idx(), 1, "DownArrow navigates to row 1");
+                assert!(!app.get_secrets_revealed(), "Navigating to another row resets secrets to masked");
 
                 // Filter search: matches 'echo' (tx 2)
                 app.invoke_filter_search_changed("echo".into());

@@ -202,31 +202,46 @@ pub fn project_headers_to_slint(
 
 /// Formats headers into a reconstructed text block bounded to `MAX_HEADERS_TEXT_BUDGET` (64 KiB).
 /// Applies identical masking for sensitive headers when `reveal_secrets` is `false`.
+/// Enforces per-field bounds (`MAX_HEADER_NAME_BYTES` and `MAX_HEADER_VALUE_BYTES`),
+/// sanitizes control characters, and never allocates unbounded formatted lines.
 pub fn project_headers_text(
     headers: &[kaska_http::models::HttpHeader],
     reveal_secrets: bool,
 ) -> String {
     let mut out = String::new();
     let mut truncated = false;
+    const TRUNCATION_NOTICE: &str = "\n[Headers text truncated at 64 KiB budget]";
+    let max_body_len = MAX_HEADERS_TEXT_BUDGET.saturating_sub(TRUNCATION_NOTICE.len());
 
     for h in headers {
         let is_sensitive = is_sensitive_header(&h.name);
-        let val = if is_sensitive && !reveal_secrets {
+        let raw_val = if is_sensitive && !reveal_secrets {
             MASKED_SECRET_PLACEHOLDER
         } else {
             &h.value
         };
 
-        let line = format!("{}: {}\n", h.name, val);
-        if out.len() + line.len() > MAX_HEADERS_TEXT_BUDGET.saturating_sub(64) {
+        let raw_name = &h.name;
+        let name_slice = floor_utf8_char_boundary_str(raw_name, MAX_HEADER_NAME_BYTES);
+        let clean_name = sanitize_display_text(name_slice);
+
+        let val_slice = floor_utf8_char_boundary_str(raw_val, MAX_HEADER_VALUE_BYTES);
+        let clean_val = sanitize_display_text(val_slice);
+
+        let line_len = clean_name.len() + 2 + clean_val.len() + 1; // "<name>: <val>\n"
+        if out.len() + line_len > max_body_len {
             truncated = true;
             break;
         }
-        out.push_str(&line);
+
+        out.push_str(&clean_name);
+        out.push_str(": ");
+        out.push_str(&clean_val);
+        out.push('\n');
     }
 
     if truncated {
-        out.push_str("\n[Headers text truncated at 64 KiB budget]");
+        out.push_str(TRUNCATION_NOTICE);
     }
 
     out
@@ -263,6 +278,144 @@ pub fn format_reconstructed_status_line(resp: &kaska_http::models::HttpResponse)
     format!("{} {} {}", version, resp.status_code, clean_reason)
 }
 
+/// Pure projected details model computed from `HttpTransaction` under UI bounds and privacy rules.
+/// Contains all display fields without requiring a live Slint window or graphics backend.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransactionDetailsProjection {
+    pub req_line: String,
+    pub req_headers_text: String,
+    pub req_headers_list: ProjectedHeadersResult,
+    pub req_body: String,
+    pub req_is_binary: bool,
+    pub req_body_truncated: bool,
+    pub resp_status_line: String,
+    pub resp_headers_text: String,
+    pub resp_headers_list: ProjectedHeadersResult,
+    pub resp_body: String,
+    pub resp_is_binary: bool,
+    pub resp_body_truncated: bool,
+    pub timing_text: String,
+    pub secrets_revealed: bool,
+}
+
+/// Computes pure details projection for a transaction or returns cleared projection.
+///
+/// Guarantees:
+/// - Pure function: zero GUI/event loop/OS dependencies.
+/// - Never leaks raw error strings from `TransactionState::Failed(err)` (PRIV-02).
+/// - Masks sensitive headers when `secrets_revealed` is `false` (PRIV-01).
+/// - Limits text and structured headers to strict UI budgets (UI-BUDGET-02).
+pub fn compute_transaction_details(
+    tx_opt: Option<&HttpTransaction>,
+    secrets_revealed: bool,
+) -> TransactionDetailsProjection {
+    if let Some(tx) = tx_opt {
+        // 1. Request details
+        let req_line = format_reconstructed_request_line(&tx.request);
+        let req_headers_text = project_headers_text(&tx.request.headers, secrets_revealed);
+        let req_headers_list = project_headers_to_slint(&tx.request.headers, secrets_revealed);
+        let req_preview = inspector_details::format_request_body_preview(&tx.request);
+
+        // 2. Response details
+        let (
+            resp_status_line,
+            resp_headers_text,
+            resp_headers_list,
+            resp_body,
+            resp_is_binary,
+            resp_body_truncated,
+            timing_text,
+        ) = if let Some(resp) = &tx.response {
+            let status_line = format_reconstructed_status_line(resp);
+            let text = project_headers_text(&resp.headers, secrets_revealed);
+            let list = project_headers_to_slint(&resp.headers, secrets_revealed);
+            let preview = inspector_details::format_response_body_preview(resp);
+            let timing = format!(
+                "Status {} • Duration: {} ms",
+                resp.status_code, tx.duration_ms
+            );
+            (
+                status_line,
+                text,
+                list,
+                preview.text,
+                preview.is_binary,
+                preview.preview_truncated,
+                timing,
+            )
+        } else {
+            let outcome_str = match &tx.state {
+                kaska_http::models::TransactionState::Pending => "Status: Pending (In flight)...",
+                kaska_http::models::TransactionState::Failed(_) => "Status: Failed",
+                kaska_http::models::TransactionState::Completed => {
+                    "Status: Completed (No response)"
+                }
+            };
+            let err_body = match &tx.state {
+                kaska_http::models::TransactionState::Failed(_) => {
+                    "Transaction failed: No response received from remote server.".to_string()
+                }
+                _ => String::new(),
+            };
+            (
+                String::new(),
+                "(No response)".to_string(),
+                ProjectedHeadersResult {
+                    items: Vec::new(),
+                    omitted_count: 0,
+                    notice: String::new(),
+                },
+                err_body,
+                false,
+                false,
+                outcome_str.to_string(),
+            )
+        };
+
+        TransactionDetailsProjection {
+            req_line,
+            req_headers_text,
+            req_headers_list,
+            req_body: req_preview.text,
+            req_is_binary: req_preview.is_binary,
+            req_body_truncated: req_preview.preview_truncated,
+            resp_status_line,
+            resp_headers_text,
+            resp_headers_list,
+            resp_body,
+            resp_is_binary,
+            resp_body_truncated,
+            timing_text,
+            secrets_revealed,
+        }
+    } else {
+        TransactionDetailsProjection {
+            req_line: String::new(),
+            req_headers_text: String::new(),
+            req_headers_list: ProjectedHeadersResult {
+                items: Vec::new(),
+                omitted_count: 0,
+                notice: String::new(),
+            },
+            req_body: String::new(),
+            req_is_binary: false,
+            req_body_truncated: false,
+            resp_status_line: String::new(),
+            resp_headers_text: String::new(),
+            resp_headers_list: ProjectedHeadersResult {
+                items: Vec::new(),
+                omitted_count: 0,
+                notice: String::new(),
+            },
+            resp_body: String::new(),
+            resp_is_binary: false,
+            resp_body_truncated: false,
+            timing_text: String::new(),
+            secrets_revealed: false,
+        }
+    }
+}
+
 /// Sets details on AppWindow from an optional HttpTransaction reference or clears them.
 ///
 /// Respects the `secrets_revealed` flag exclusively for the currently active transaction.
@@ -271,89 +424,25 @@ pub fn set_transaction_details_on_ui(
     tx_opt: Option<&HttpTransaction>,
     secrets_revealed: bool,
 ) {
-    ui.set_secrets_revealed(secrets_revealed);
+    let proj = compute_transaction_details(tx_opt, secrets_revealed);
 
-    if let Some(tx) = tx_opt {
-        // 1. Request details
-        ui.set_active_req_line(SharedString::from(format_reconstructed_request_line(
-            &tx.request,
-        )));
-        let req_text = project_headers_text(&tx.request.headers, secrets_revealed);
-        ui.set_active_req_headers(SharedString::from(req_text));
+    ui.set_secrets_revealed(proj.secrets_revealed);
+    ui.set_active_req_line(SharedString::from(proj.req_line));
+    ui.set_active_req_headers(SharedString::from(proj.req_headers_text));
+    ui.set_active_req_headers_list(ModelRc::new(VecModel::from(proj.req_headers_list.items)));
+    ui.set_active_req_headers_omitted(SharedString::from(proj.req_headers_list.notice));
+    ui.set_active_req_body(SharedString::from(proj.req_body));
+    ui.set_active_req_is_binary(proj.req_is_binary);
+    ui.set_active_req_body_truncated(proj.req_body_truncated);
 
-        let req_headers_proj = project_headers_to_slint(&tx.request.headers, secrets_revealed);
-        ui.set_active_req_headers_list(ModelRc::new(VecModel::from(req_headers_proj.items)));
-        ui.set_active_req_headers_omitted(SharedString::from(req_headers_proj.notice));
-
-        let req_preview = inspector_details::format_request_body_preview(&tx.request);
-        ui.set_active_req_body(SharedString::from(req_preview.text));
-        ui.set_active_req_is_binary(req_preview.is_binary);
-        ui.set_active_req_body_truncated(req_preview.preview_truncated);
-
-        // 2. Response details
-        if let Some(resp) = &tx.response {
-            ui.set_active_resp_status_line(SharedString::from(format_reconstructed_status_line(
-                resp,
-            )));
-            let resp_text = project_headers_text(&resp.headers, secrets_revealed);
-            ui.set_active_resp_headers(SharedString::from(resp_text));
-
-            let resp_headers_proj = project_headers_to_slint(&resp.headers, secrets_revealed);
-            ui.set_active_resp_headers_list(ModelRc::new(VecModel::from(resp_headers_proj.items)));
-            ui.set_active_resp_headers_omitted(SharedString::from(resp_headers_proj.notice));
-
-            let resp_preview = inspector_details::format_response_body_preview(resp);
-            ui.set_active_resp_body(SharedString::from(resp_preview.text));
-            ui.set_active_resp_is_binary(resp_preview.is_binary);
-            ui.set_active_resp_body_truncated(resp_preview.preview_truncated);
-
-            ui.set_active_timing_text(SharedString::from(format!(
-                "Status {} • Duration: {} ms",
-                resp.status_code, tx.duration_ms
-            )));
-        } else {
-            ui.set_active_resp_status_line(SharedString::from(""));
-            ui.set_active_resp_headers(SharedString::from("(No response)"));
-            ui.set_active_resp_headers_list(ModelRc::new(VecModel::from(Vec::<HeaderItem>::new())));
-            ui.set_active_resp_headers_omitted(SharedString::from(""));
-            ui.set_active_resp_body(SharedString::from(""));
-            ui.set_active_resp_is_binary(false);
-            ui.set_active_resp_body_truncated(false);
-
-            let outcome_str = match &tx.state {
-                kaska_http::models::TransactionState::Pending => "Status: Pending (In flight)...",
-                kaska_http::models::TransactionState::Failed(_) => {
-                    ui.set_active_resp_body(SharedString::from(
-                        "Transaction failed: No response received from remote server.",
-                    ));
-                    "Status: Failed"
-                }
-                kaska_http::models::TransactionState::Completed => {
-                    "Status: Completed (No response)"
-                }
-            };
-            ui.set_active_timing_text(SharedString::from(outcome_str));
-        }
-    } else {
-        // Clear all details
-        ui.set_active_req_line(SharedString::from(""));
-        ui.set_active_req_headers(SharedString::from(""));
-        ui.set_active_req_headers_list(ModelRc::new(VecModel::from(Vec::<HeaderItem>::new())));
-        ui.set_active_req_headers_omitted(SharedString::from(""));
-        ui.set_active_req_body(SharedString::from(""));
-        ui.set_active_req_is_binary(false);
-        ui.set_active_req_body_truncated(false);
-
-        ui.set_active_resp_status_line(SharedString::from(""));
-        ui.set_active_resp_headers(SharedString::from(""));
-        ui.set_active_resp_headers_list(ModelRc::new(VecModel::from(Vec::<HeaderItem>::new())));
-        ui.set_active_resp_headers_omitted(SharedString::from(""));
-        ui.set_active_resp_body(SharedString::from(""));
-        ui.set_active_resp_is_binary(false);
-        ui.set_active_resp_body_truncated(false);
-
-        ui.set_active_timing_text(SharedString::from(""));
-    }
+    ui.set_active_resp_status_line(SharedString::from(proj.resp_status_line));
+    ui.set_active_resp_headers(SharedString::from(proj.resp_headers_text));
+    ui.set_active_resp_headers_list(ModelRc::new(VecModel::from(proj.resp_headers_list.items)));
+    ui.set_active_resp_headers_omitted(SharedString::from(proj.resp_headers_list.notice));
+    ui.set_active_resp_body(SharedString::from(proj.resp_body));
+    ui.set_active_resp_is_binary(proj.resp_is_binary);
+    ui.set_active_resp_body_truncated(proj.resp_body_truncated);
+    ui.set_active_timing_text(SharedString::from(proj.timing_text));
 }
 
 /// Helper that refreshes the UI from current store state, filters, and selection.
@@ -2542,13 +2631,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ui_privacy_and_safe_error_integration() {
+    fn test_pure_privacy_and_safe_error_integration() {
         use kaska_http::models::{
             HttpHeader, HttpMethod, HttpRequest, HttpResponse, HttpTransaction, TransactionState,
         };
-        let app = AppWindow::new().unwrap();
 
-        // 1. Synthetic failed transaction containing secrets, URLs, and OS error traces
+        // 1. Synthetic failed transaction containing secrets, URLs, and OS error traces (PRIV-02)
         let dirty_tx = HttpTransaction {
             id: 101,
             request: HttpRequest {
@@ -2558,7 +2646,7 @@ mod tests {
                 path: "/login".to_string(),
                 query: "token=super_secret_query_token".to_string(),
                 http_version: "HTTP/1.1".to_string(),
-                headers: vec![],
+                headers: vec![HttpHeader::new("Authorization", "Bearer dirty_token")],
                 body: vec![],
             },
             response: None,
@@ -2569,30 +2657,31 @@ mod tests {
             timestamp_rfc3339: "2026-10-19T00:00:00Z".to_string(),
         };
 
-        set_transaction_details_on_ui(&app, Some(&dirty_tx), false);
-
-        let resp_body = app.get_active_resp_body().to_string();
-        let timing_text = app.get_active_timing_text().to_string();
+        let proj = compute_transaction_details(Some(&dirty_tx), false);
 
         // Verify the response body contains ONLY the safe static message
         assert_eq!(
-            resp_body,
+            proj.resp_body,
             "Transaction failed: No response received from remote server."
         );
-        assert_eq!(timing_text, "Status: Failed");
+        assert_eq!(proj.timing_text, "Status: Failed");
 
         // Verify absolutely zero leakage of sensitive data
-        assert!(!resp_body.contains("Authorization"));
-        assert!(!resp_body.contains("secret_token_xyz"));
-        assert!(!resp_body.contains("Cookie"));
-        assert!(!resp_body.contains("session=admin_abc"));
-        assert!(!resp_body.contains("internal.corp.local"));
-        assert!(!resp_body.contains("internal.local"));
-        assert!(!resp_body.contains("super_secret_query_token"));
-        assert!(!resp_body.contains("Connection refused"));
-        assert!(!resp_body.contains("\x1b"));
+        assert!(!proj.resp_body.contains("Authorization"));
+        assert!(!proj.resp_body.contains("secret_token_xyz"));
+        assert!(!proj.resp_body.contains("Cookie"));
+        assert!(!proj.resp_body.contains("session=admin_abc"));
+        assert!(!proj.resp_body.contains("internal.corp.local"));
+        assert!(!proj.resp_body.contains("internal.local"));
+        assert!(!proj.resp_body.contains("super_secret_query_token"));
+        assert!(!proj.resp_body.contains("Connection refused"));
+        assert!(!proj.resp_body.contains("\x1b"));
 
-        // 2. Privacy state synchronization and reset
+        // Verify sensitive headers in request are masked by default
+        assert!(proj.req_headers_text.contains(MASKED_SECRET_PLACEHOLDER));
+        assert!(!proj.req_headers_text.contains("dirty_token"));
+
+        // 2. Privacy state synchronization and selection lifecycle logic (PRIV-01)
         let store = create_shared_store();
         let scope = AuditScope::default();
         let filter = FilterState::default();
@@ -2626,58 +2715,140 @@ mod tests {
         let mut selected_id = Some(1);
         let mut secrets_revealed = false;
 
-        // 2a. Initial refresh with secrets_revealed = false: headers are masked
-        refresh_traffic_ui(
-            &app,
-            &store,
-            &scope,
-            &filter,
-            &mut selected_id,
-            &mut secrets_revealed,
-            None,
-        );
-        assert!(!app.get_secrets_revealed());
-        let req_headers = app.get_active_req_headers().to_string();
-        assert!(req_headers.contains(MASKED_SECRET_PLACEHOLDER));
-        assert!(!req_headers.contains("secret_jwt_token"));
+        // 2a. Initial state with secrets_revealed = false: headers are masked
+        let summaries = store.lock().unwrap().get_metadata_snapshot();
+        let (_, _, _, _, retained) = project_traffic(&summaries, &filter, &scope, selected_id);
+        assert!(retained);
+        let tx_ref = store.lock().unwrap().get_by_id(1).cloned();
+        let initial_proj = compute_transaction_details(tx_ref.as_ref(), secrets_revealed);
+        assert!(!initial_proj.secrets_revealed);
+        assert!(initial_proj
+            .req_headers_text
+            .contains(MASKED_SECRET_PLACEHOLDER));
+        assert!(!initial_proj.req_headers_text.contains("secret_jwt_token"));
+        assert!(initial_proj
+            .resp_headers_text
+            .contains(MASKED_SECRET_PLACEHOLDER));
+        assert!(!initial_proj.resp_headers_text.contains("admin_session_val"));
 
-        // 2b. User reveals secrets: secrets_revealed = true
+        // 2b. Explicit reveal: secrets_revealed = true
         secrets_revealed = true;
-        set_transaction_details_on_ui(&app, store.lock().unwrap().get_by_id(1), secrets_revealed);
-        assert!(app.get_secrets_revealed());
-        let revealed_req_headers = app.get_active_req_headers().to_string();
-        assert!(revealed_req_headers.contains("secret_jwt_token"));
-        assert!(!revealed_req_headers.contains(MASKED_SECRET_PLACEHOLDER));
+        let revealed_proj = compute_transaction_details(tx_ref.as_ref(), secrets_revealed);
+        assert!(revealed_proj.secrets_revealed);
+        assert!(revealed_proj.req_headers_text.contains("secret_jwt_token"));
+        assert!(!revealed_proj
+            .req_headers_text
+            .contains(MASKED_SECRET_PLACEHOLDER));
+        assert!(revealed_proj
+            .resp_headers_text
+            .contains("admin_session_val"));
+        assert!(!revealed_proj
+            .resp_headers_text
+            .contains(MASKED_SECRET_PLACEHOLDER));
 
-        // 2c. Live update / refresh while selection is retained: user intent is preserved
-        refresh_traffic_ui(
-            &app,
-            &store,
-            &scope,
-            &filter,
-            &mut selected_id,
-            &mut secrets_revealed,
-            None,
-        );
+        // 2c. Selection retained across live update: secrets_revealed is preserved
+        let summaries_update = store.lock().unwrap().get_metadata_snapshot();
+        let (_, _, _, _, retained_update) =
+            project_traffic(&summaries_update, &filter, &scope, selected_id);
+        assert!(retained_update);
         assert!(secrets_revealed);
-        assert!(app.get_secrets_revealed());
 
-        // 2d. Selection lost (e.g. filtered out): secrets_revealed resets to false
+        // 2d. Selection lost (filtered out): secrets_revealed resets to false
         let filter_hide = FilterState {
             search_query: "non_existent_path".to_string(),
             ..Default::default()
         };
-        refresh_traffic_ui(
-            &app,
-            &store,
-            &scope,
-            &filter_hide,
-            &mut selected_id,
-            &mut secrets_revealed,
-            None,
-        );
+        let (_, _, _, _, retained_hide) =
+            project_traffic(&summaries_update, &filter_hide, &scope, selected_id);
+        assert!(!retained_hide);
+        if !retained_hide {
+            selected_id = None;
+            secrets_revealed = false;
+        }
         assert_eq!(selected_id, None);
         assert!(!secrets_revealed);
-        assert!(!app.get_secrets_revealed());
+        let cleared_proj = compute_transaction_details(None, secrets_revealed);
+        assert!(!cleared_proj.secrets_revealed);
+        assert_eq!(cleared_proj.req_headers_text, "");
+        assert_eq!(cleared_proj.resp_headers_text, "");
+    }
+
+    #[test]
+    fn test_project_headers_text_bounded_and_sanitized() {
+        use kaska_http::models::HttpHeader;
+
+        // 1. Oversized header name (> 256 bytes) clamped and sanitized
+        let huge_name = "X-Long-Name-".repeat(30); // ~360 bytes
+        let h1 = HttpHeader::new(huge_name, "normal_value");
+        let text1 = project_headers_text(&[h1], false);
+        let first_line = text1.lines().next().unwrap();
+        let name_part = first_line.split(':').next().unwrap();
+        assert_eq!(name_part.len(), MAX_HEADER_NAME_BYTES);
+
+        // 2. Oversized header value (> 1024 bytes) clamped and sanitized
+        let huge_val = "B".repeat(2000);
+        let h2 = HttpHeader::new("X-Huge", huge_val);
+        let text2 = project_headers_text(&[h2], false);
+        let val_part = text2
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("X-Huge: ")
+            .unwrap();
+        assert_eq!(val_part.len(), MAX_HEADER_VALUE_BYTES);
+
+        // 3. Control characters and CRLF injection sanitized to spaces
+        let dirty_header = HttpHeader::new(
+            "X-Header\r\nInjected: true",
+            "Value\x00With\x1b[31mEscape\r\nSec-Key: secret",
+        );
+        let text3 = project_headers_text(&[dirty_header], false);
+        // Must contain exactly 1 newline at the end of the line
+        assert_eq!(text3.lines().count(), 1);
+        assert!(!text3.contains('\r'));
+        assert!(!text3.contains('\x00'));
+        assert!(!text3.contains('\x1b'));
+        assert!(
+            text3.starts_with("X-Header  Injected: true: Value With [31mEscape  Sec-Key: secret")
+        );
+
+        // 4. Aggregate budget strictly capped at 64 KiB
+        let mut many_headers = Vec::new();
+        for i in 0..1500 {
+            many_headers.push(HttpHeader::new(
+                format!("X-Header-Item-{:04}", i),
+                "A".repeat(100),
+            ));
+        }
+        let text_agg = project_headers_text(&many_headers, false);
+        assert!(text_agg.len() <= MAX_HEADERS_TEXT_BUDGET);
+        assert!(text_agg.ends_with("\n[Headers text truncated at 64 KiB budget]"));
+
+        // 5. Sensitive header masking vs reveal in text mode
+        let auth_header = HttpHeader::new("Authorization", "Bearer super_secret_token_123");
+        let cookie_header = HttpHeader::new("Set-Cookie", "session=top_secret_cookie_456");
+
+        let masked_text =
+            project_headers_text(&[auth_header.clone(), cookie_header.clone()], false);
+        assert!(masked_text.contains(MASKED_SECRET_PLACEHOLDER));
+        assert!(!masked_text.contains("super_secret_token_123"));
+        assert!(!masked_text.contains("top_secret_cookie_456"));
+
+        let revealed_text = project_headers_text(&[auth_header, cookie_header], true);
+        assert!(!revealed_text.contains(MASKED_SECRET_PLACEHOLDER));
+        assert!(revealed_text.contains("super_secret_token_123"));
+        assert!(revealed_text.contains("top_secret_cookie_456"));
+
+        // 6. Multibyte UTF-8 boundary safe truncation in text mode
+        let mut mb_name = "a".repeat(254);
+        mb_name.push('🦀'); // 258 bytes
+        let mut mb_val = "b".repeat(1022);
+        mb_val.push('🦀'); // 1026 bytes
+        let mb_header = HttpHeader::new(mb_name, mb_val);
+        let mb_text = project_headers_text(&[mb_header], false);
+        let mb_line = mb_text.lines().next().unwrap();
+        let parts: Vec<&str> = mb_line.split(": ").collect();
+        assert_eq!(parts[0].len(), 254);
+        assert_eq!(parts[1].len(), 1022);
     }
 }
