@@ -175,6 +175,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let filter_failed_events = Rc::new(Cell::new(false));
     let ff_clone = filter_failed_events.clone();
     app.on_filter_hide_failed_changed(move |v| ff_clone.set(v));
+    let reveal_events = Rc::new(Cell::new(0usize));
+    let rev_clone = reveal_events.clone();
+    app.on_toggle_reveal_secrets(move || rev_clone.set(rev_clone.get() + 1));
     app.show()?;
     resize(app.window(), 1180.0, 680.0);
     let proxy_reservation = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -326,7 +329,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 app.invoke_reset_filters();
                 assert_eq!(filter_reset_events.get(), 1, "Reset filters callback executed");
 
-                println!("PASS: pointer/keyboard selection, 10,000 rows, action callbacks, loading guard, keyboard navigation, all filter callbacks");
+                // Verify 1.4B-2 privacy toggle callback and transitions are exercised
+                assert!(!app.get_secrets_revealed(), "Initial state is masked");
+                app.invoke_toggle_reveal_secrets();
+                assert_eq!(reveal_events.get(), 1, "Toggle reveal secrets callback executed");
+                app.set_secrets_revealed(true);
+                assert!(app.get_secrets_revealed(), "Revealed state active");
+                app.invoke_toggle_reveal_secrets();
+                assert_eq!(reveal_events.get(), 2, "Toggle reveal secrets callback executed again");
+                app.set_secrets_revealed(false);
+                assert!(!app.get_secrets_revealed(), "Re-masked state active");
+
+                println!("PASS: pointer/keyboard selection, 10,000 rows, action callbacks, loading guard, keyboard navigation, all filter callbacks, privacy toggle transitions");
             }
             if index < sizes.len() * 4 {
                 let (width, height) = sizes[index / 4];
@@ -395,10 +409,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 assert_eq!(app.get_selected_transaction_idx(), 0);
                 assert!(!app.get_active_req_headers().is_empty());
                 assert!(!app.get_active_resp_headers().is_empty());
+                assert!(!app.get_secrets_revealed(), "Selected transaction defaults to masked");
+
+                // Live controller toggle reveal secrets on selected transaction
+                app.invoke_toggle_reveal_secrets();
+                assert!(app.get_secrets_revealed(), "Toggle reveals secrets on live controller");
+                app.invoke_toggle_reveal_secrets();
+                assert!(!app.get_secrets_revealed(), "Toggle again re-masks secrets on live controller");
 
                 // Keyboard selection navigation to Row 1 (POST /api/echo)
                 key(app.window(), slint::platform::Key::DownArrow);
                 assert_eq!(app.get_selected_transaction_idx(), 1, "DownArrow navigates to row 1");
+                assert!(!app.get_secrets_revealed(), "Navigating to another row resets secrets to masked");
 
                 // Filter search: matches 'echo' (tx 2)
                 app.invoke_filter_search_changed("echo".into());

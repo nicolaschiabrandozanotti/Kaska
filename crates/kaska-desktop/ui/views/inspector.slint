@@ -2,7 +2,7 @@ import { ListView, ScrollView, ComboBox } from "std-widgets.slint";
 import { AppTheme } from "../styles/theme.slint";
 import { ActionButton } from "../components/action_button.slint";
 import { DocumentPanel, DocumentView } from "../components/document_view.slint";
-import { TrafficItem } from "../components/traffic_types.slint";
+import { TrafficItem, HeaderItem } from "../components/traffic_types.slint";
 
 component TrafficColumns inherits HorizontalLayout {
     in property <TrafficItem> item;
@@ -108,17 +108,32 @@ export component NetworkInspectorView inherits Rectangle {
     in property <int> visible-count: 0;
     in-out property <int> selected-index: -1;
     in property <string> active-req-headers;
+    in property <[HeaderItem]> active-req-headers-list: [];
+    in property <string> active-req-headers-omitted: "";
+    in property <string> active-req-line: "";
     in property <string> active-req-body;
+    in property <bool> active-req-is-binary: false;
+    in property <bool> active-req-body-truncated: false;
     in property <string> active-resp-headers;
+    in property <[HeaderItem]> active-resp-headers-list: [];
+    in property <string> active-resp-headers-omitted: "";
+    in property <string> active-resp-status-line: "";
     in property <string> active-resp-body;
+    in property <bool> active-resp-is-binary: false;
+    in property <bool> active-resp-body-truncated: false;
     in property <string> active-timing-text;
     in property <bool> proxy-running;
     in property <string> proxy-addr;
     in-out property <bool> request-body-tab;
     in-out property <bool> response-body-tab;
+    in-out property <bool> request-structured-headers: true;
+    in-out property <bool> response-structured-headers: true;
+    in property <bool> secrets-revealed: false;
     in-out property <bool> show-response;
     in-out property <bool> show-details;
     in-out property <float> table-ratio: 0.4;
+
+    callback toggle-reveal-secrets();
 
     // Filter bar state
     in-out property <string> filter-search: "";
@@ -444,24 +459,40 @@ export component NetworkInspectorView inherits Rectangle {
                         if !root.compact || !root.show-response: DocumentPanel {
                             horizontal-stretch: 1;
                             title: "Request";
-                            headers: root.active-req-headers;
+                            proto-line: root.active-req-line;
+                            headers-list: root.active-req-headers-list;
+                            headers-text: root.active-req-headers;
+                            headers-omitted-notice: root.active-req-headers-omitted;
                             body: root.active-req-body;
+                            is-binary: root.active-req-is-binary;
+                            preview-truncated: root.active-req-body-truncated;
                             has-selection: root.selected-index >= 0 && root.selected-index < root.items.length;
                             body-tab <=> root.request-body-tab;
+                            structured-headers <=> root.request-structured-headers;
+                            secrets-revealed: root.secrets-revealed;
+                            toggle-reveal-secrets => { root.toggle-reveal-secrets(); }
                         }
                         if !root.compact || root.show-response: DocumentPanel {
                             horizontal-stretch: 1;
                             title: "Response";
                             summary: root.active-timing-text;
-                            headers: root.active-resp-headers;
+                            proto-line: root.active-resp-status-line;
+                            headers-list: root.active-resp-headers-list;
+                            headers-text: root.active-resp-headers;
+                            headers-omitted-notice: root.active-resp-headers-omitted;
                             body: root.active-resp-body;
+                            is-binary: root.active-resp-is-binary;
+                            preview-truncated: root.active-resp-body-truncated;
                             has-selection: root.selected-index >= 0 && root.selected-index < root.items.length;
                             body-tab <=> root.response-body-tab;
+                            structured-headers <=> root.response-structured-headers;
+                            secrets-revealed: root.secrets-revealed;
+                            toggle-reveal-secrets => { root.toggle-reveal-secrets(); }
                         }
                     }
                 }
             }
         }
-        if root.height > 300px: Text { text: "Text preview | Response inspection is limited to 2 MiB; binary data may appear as replacement characters."; font-size: 12px; color: AppTheme.text-muted; wrap: word-wrap; }
+        if root.height > 300px: Text { text: "Safe Preview Engine | Body previews bounded to 64 KiB; binary payloads rendered as safe hex dump."; font-size: 12px; color: AppTheme.text-muted; wrap: word-wrap; }
     }
 }
