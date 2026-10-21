@@ -33,7 +33,7 @@ pub mod filter;
 pub mod platform;
 
 use kaska_http::models::{
-    HttpMethod, HttpRequest, HttpResponse, HttpTransaction, TransactionState,
+    HttpHeader, HttpMethod, HttpRequest, HttpResponse, HttpTransaction, TransactionState,
 };
 use kaska_http::proxy::{BoundedProxyObserver, NativeProxyServer};
 use kaska_http::scope::AuditScope;
@@ -61,6 +61,7 @@ pub enum CliCommand {
     Pilot100,
     All,
     Inspector10k,
+    InspectorDetails,
     Help,
 }
 
@@ -117,6 +118,12 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
                 }
                 command = Some(CliCommand::Inspector10k);
             }
+            "--inspector-details" => {
+                if command.is_some() {
+                    return Err(format!("Conflicting command specified: '{}'", arg));
+                }
+                command = Some(CliCommand::InspectorDetails);
+            }
             "--help" | "-h" => {
                 return Ok(CliConfig {
                     command: CliCommand::Help,
@@ -132,7 +139,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
             }
             unknown => {
                 return Err(format!(
-                    "Unknown or unauthorized argument '{}'. Allowed options: --validate, --pilot-5, --pilot-25, --pilot-100, --all, --inspector-10k, --output-dir <DIR>, --help",
+                    "Unknown or unauthorized argument '{}'. Allowed options: --validate, --pilot-5, --pilot-25, --pilot-100, --all, --inspector-10k, --inspector-details, --output-dir <DIR>, --help",
                     unknown
                 ));
             }
@@ -141,7 +148,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
     }
 
     let cmd = command.ok_or_else(|| {
-        "No command specified. Usage: perf_baseline [--validate | --pilot-5 | --pilot-25 | --pilot-100 | --all | --inspector-10k] [--output-dir <DIR>]".to_string()
+        "No command specified. Usage: perf_baseline [--validate | --pilot-5 | --pilot-25 | --pilot-100 | --all | --inspector-10k | --inspector-details] [--output-dir <DIR>]".to_string()
     })?;
 
     Ok(CliConfig {
@@ -342,6 +349,17 @@ impl SampleStatistics {
         let mut sorted = self.raw_samples.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let idx = ((sorted.len() as f64) * 0.95).ceil() as usize;
+        let clamped = idx.saturating_sub(1).min(sorted.len() - 1);
+        sorted[clamped]
+    }
+
+    pub fn p99(&self) -> f64 {
+        if self.raw_samples.is_empty() {
+            return 0.0;
+        }
+        let mut sorted = self.raw_samples.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx = ((sorted.len() as f64) * 0.99).ceil() as usize;
         let clamped = idx.saturating_sub(1).min(sorted.len() - 1);
         sorted[clamped]
     }
@@ -1538,6 +1556,280 @@ pub fn format_inspector_10k_summary(res: &Inspector10kResult) -> String {
     );
     out.push_str("  • NOTE: Microbenchmarks isolate heap allocation, metadata iteration, and ModelRc wrapping;\n");
     out.push_str("    they do NOT measure real Slint UI render/event-loop scheduling latency.\n");
+    out.push_str("==================================================================\n");
+    out
+}
+
+/// Inspector Details Projection and Formatting Benchmark Result
+#[derive(Debug, Clone)]
+pub struct InspectorDetailsResult {
+    pub std_projection: SampleStatistics,
+    pub headers_masked: SampleStatistics,
+    pub headers_revealed: SampleStatistics,
+    pub text_body_preview: SampleStatistics,
+    pub binary_hexdump: SampleStatistics,
+    pub store_lookup_and_projection: SampleStatistics,
+}
+
+/// Runs the Inspector details projection and formatting benchmark (P-DET-01 through P-DET-05).
+pub fn run_inspector_details_benchmark(iterations: usize) -> InspectorDetailsResult {
+    // 1. Prepare P-DET-01 standard transaction fixture (15 headers req/resp, 2 KiB body)
+    let mut req_headers = Vec::with_capacity(15);
+    req_headers.push(HttpHeader::new("Host", "api.kaska.internal"));
+    req_headers.push(HttpHeader::new("User-Agent", "Kaska-Client/1.0"));
+    req_headers.push(HttpHeader::new("Accept", "application/json"));
+    req_headers.push(HttpHeader::new("Accept-Encoding", "gzip, deflate"));
+    req_headers.push(HttpHeader::new("Connection", "keep-alive"));
+    for k in 1..=10 {
+        req_headers.push(HttpHeader::new(
+            format!("X-Request-Header-{}", k),
+            format!("value_{}", k),
+        ));
+    }
+    let req_body = vec![b'A'; 2048];
+    let request = HttpRequest {
+        method: HttpMethod::Post,
+        raw_url: "/api/v1/resource".to_string(),
+        host: "api.kaska.internal".to_string(),
+        path: "/api/v1/resource".to_string(),
+        query: String::new(),
+        http_version: "HTTP/1.1".to_string(),
+        headers: req_headers,
+        body: req_body,
+    };
+
+    let mut resp_headers = Vec::with_capacity(15);
+    resp_headers.push(HttpHeader::new("Content-Type", "application/json"));
+    resp_headers.push(HttpHeader::new("Content-Length", "2048"));
+    resp_headers.push(HttpHeader::new("Server", "kaska-test/1.0"));
+    for k in 1..=12 {
+        resp_headers.push(HttpHeader::new(
+            format!("X-Response-Header-{}", k),
+            format!("resp_value_{}", k),
+        ));
+    }
+    let resp_body = vec![b'B'; 2048];
+    let response = HttpResponse {
+        status_code: 200,
+        status_text: "OK".to_string(),
+        http_version: "HTTP/1.1".to_string(),
+        headers: resp_headers,
+        body: resp_body,
+    };
+
+    let std_tx = HttpTransaction {
+        id: 1,
+        request,
+        response: Some(response),
+        state: TransactionState::Completed,
+        duration_ms: 42,
+        timestamp_rfc3339: "2026-10-19T00:00:00Z".to_string(),
+    };
+
+    // 2. Prepare P-DET-02 50 headers fixture with mixed sensitive and non-sensitive headers
+    let mut headers_50 = Vec::with_capacity(50);
+    headers_50.push(HttpHeader::new(
+        "Authorization",
+        "Bearer SYNTHETIC_SECRET_TOKEN_XYZ_123456789",
+    ));
+    headers_50.push(HttpHeader::new(
+        "Cookie",
+        "session=SYNTHETIC_COOKIE_ABCD1234EFGH5678; user=test",
+    ));
+    headers_50.push(HttpHeader::new(
+        "Set-Cookie",
+        "token=SYNTHETIC_SECRET_VAL; Secure; HttpOnly",
+    ));
+    headers_50.push(HttpHeader::new(
+        "Proxy-Authorization",
+        "Basic SYNTHETIC_CREDS_XYZ",
+    ));
+    headers_50.push(HttpHeader::new(
+        "X-Api-Key",
+        "SYNTHETIC_API_KEY_SECRET_987654321",
+    ));
+    for i in 6..=50 {
+        headers_50.push(HttpHeader::new(
+            format!("X-Audit-Header-{:02}", i),
+            format!("audit-value-payload-token-{:04}", i * 17),
+        ));
+    }
+
+    // 3. Prepare P-DET-03 64 KiB UTF-8 text fixture
+    let text_64k: Vec<u8> = format!(
+        "{{\"status\":\"ok\",\"payload\":\"{}\"}}",
+        "x".repeat(65400)
+    )
+    .into_bytes();
+
+    // 4. Prepare P-DET-04 1 MiB binary payload fixture
+    let mut bin_1m = vec![0u8; 1024 * 1024];
+    for (idx, byte) in bin_1m.iter_mut().enumerate() {
+        *byte = ((idx.wrapping_mul(31) ^ 0xAA) % 256) as u8;
+    }
+
+    // 5. Prepare P-DET-05 store fixture with 10k transactions
+    let synth = generate_synthetic_transactions(10_000, DEFAULT_FIXED_SEED);
+    let mut store = TrafficStore::new(10_000);
+    for tx in synth {
+        store.insert(tx);
+    }
+    let store_arc = Arc::new(Mutex::new(store));
+    let target_id = 5000u64;
+
+    // Warm-up pass (unmeasured)
+    {
+        let p1 = controller::compute_transaction_details(Some(&std_tx), false);
+        std::hint::black_box(p1);
+
+        let p2_slint = controller::project_headers_to_slint(&headers_50, false);
+        let p2_text = controller::project_headers_text(&headers_50, false);
+        std::hint::black_box((p2_slint, p2_text));
+
+        let p2_slint_rev = controller::project_headers_to_slint(&headers_50, true);
+        let p2_text_rev = controller::project_headers_text(&headers_50, true);
+        std::hint::black_box((p2_slint_rev, p2_text_rev));
+
+        let p3 = controller::inspector_details::format_inspector_body_preview_with_meta(
+            &text_64k,
+            Some(text_64k.len()),
+            controller::inspector_details::CaptureTruncation::NotTruncated,
+            controller::inspector_details::DEFAULT_PREVIEW_BUDGET,
+        );
+        std::hint::black_box(p3);
+
+        let p4 = controller::inspector_details::format_inspector_body_preview_with_meta(
+            &bin_1m,
+            Some(bin_1m.len()),
+            controller::inspector_details::CaptureTruncation::NotTruncated,
+            controller::inspector_details::DEFAULT_PREVIEW_BUDGET,
+        );
+        std::hint::black_box(p4);
+
+        let store_guard = store_arc.lock().unwrap();
+        let item = store_guard.get_by_id(target_id);
+        let p5 = controller::compute_transaction_details(item, false);
+        std::hint::black_box((item, p5));
+    }
+
+    let iters = iterations.max(1);
+    let mut det_01_samples = Vec::with_capacity(iters);
+    let mut det_02_masked_samples = Vec::with_capacity(iters);
+    let mut det_02_revealed_samples = Vec::with_capacity(iters);
+    let mut det_03_samples = Vec::with_capacity(iters);
+    let mut det_04_samples = Vec::with_capacity(iters);
+    let mut det_05_samples = Vec::with_capacity(iters);
+
+    for _ in 0..iters {
+        // P-DET-01: Standard projection
+        let t0 = Instant::now();
+        let proj1 = controller::compute_transaction_details(Some(&std_tx), false);
+        std::hint::black_box(proj1);
+        let t1 = Instant::now();
+        det_01_samples.push((t1 - t0).as_nanos() as f64 / 1000.0);
+
+        // P-DET-02A: 50 headers projection - masked
+        let t0 = Instant::now();
+        let p2_slint = controller::project_headers_to_slint(&headers_50, false);
+        let p2_text = controller::project_headers_text(&headers_50, false);
+        std::hint::black_box((p2_slint, p2_text));
+        let t1 = Instant::now();
+        det_02_masked_samples.push((t1 - t0).as_nanos() as f64 / 1000.0);
+
+        // P-DET-02B: 50 headers projection - revealed
+        let t0 = Instant::now();
+        let p2_slint_rev = controller::project_headers_to_slint(&headers_50, true);
+        let p2_text_rev = controller::project_headers_text(&headers_50, true);
+        std::hint::black_box((p2_slint_rev, p2_text_rev));
+        let t1 = Instant::now();
+        det_02_revealed_samples.push((t1 - t0).as_nanos() as f64 / 1000.0);
+
+        // P-DET-03: 64 KiB text body preview
+        let t0 = Instant::now();
+        let p3 = controller::inspector_details::format_inspector_body_preview_with_meta(
+            &text_64k,
+            Some(text_64k.len()),
+            controller::inspector_details::CaptureTruncation::NotTruncated,
+            controller::inspector_details::DEFAULT_PREVIEW_BUDGET,
+        );
+        std::hint::black_box(p3);
+        let t1 = Instant::now();
+        det_03_samples.push((t1 - t0).as_nanos() as f64 / 1000.0);
+
+        // P-DET-04: 1 MiB binary payload hexdump cap
+        let t0 = Instant::now();
+        let p4 = controller::inspector_details::format_inspector_body_preview_with_meta(
+            &bin_1m,
+            Some(bin_1m.len()),
+            controller::inspector_details::CaptureTruncation::NotTruncated,
+            controller::inspector_details::DEFAULT_PREVIEW_BUDGET,
+        );
+        std::hint::black_box(p4);
+        let t1 = Instant::now();
+        det_04_samples.push((t1 - t0).as_nanos() as f64 / 1000.0);
+
+        // P-DET-05: Store 10k lookup + compute_transaction_details
+        let t0 = Instant::now();
+        let store_guard = store_arc.lock().unwrap();
+        let item = store_guard.get_by_id(target_id);
+        let p5 = controller::compute_transaction_details(item, false);
+        std::hint::black_box((item, p5));
+        let t1 = Instant::now();
+        det_05_samples.push((t1 - t0).as_nanos() as f64 / 1000.0);
+    }
+
+    InspectorDetailsResult {
+        std_projection: SampleStatistics::compute(det_01_samples).unwrap(),
+        headers_masked: SampleStatistics::compute(det_02_masked_samples).unwrap(),
+        headers_revealed: SampleStatistics::compute(det_02_revealed_samples).unwrap(),
+        text_body_preview: SampleStatistics::compute(det_03_samples).unwrap(),
+        binary_hexdump: SampleStatistics::compute(det_04_samples).unwrap(),
+        store_lookup_and_projection: SampleStatistics::compute(det_05_samples).unwrap(),
+    }
+}
+
+/// Formats the InspectorDetailsResult into an informative summary report string.
+pub fn format_inspector_details_summary(res: &InspectorDetailsResult) -> String {
+    let mut out = String::new();
+    out.push_str("==================================================================\n");
+    out.push_str("MODULE: INSPECTOR DETAILS PROJECTION & PERFORMANCE BENCHMARK\n");
+    out.push_str("==================================================================\n");
+    let fmt_stage = |name: &str, s: &SampleStatistics| -> String {
+        format!(
+            "  • {:<40} min: {:>9.2} us | p50: {:>9.2} us | p95: {:>9.2} us | p99: {:>9.2} us | max: {:>9.2} us (mean: {:>9.2} us, std_dev: {:>7.2} us)\n",
+            name, s.min, s.median, s.p95(), s.p99(), s.max, s.mean, s.std_dev
+        )
+    };
+    out.push_str("DETAILS BENCHMARK LATENCIES (microseconds):\n");
+    out.push_str(&fmt_stage(
+        "1. P-DET-01 Standard Projection (15h/2KiB)",
+        &res.std_projection,
+    ));
+    out.push_str(&fmt_stage(
+        "2. P-DET-02A 50 Headers Masked",
+        &res.headers_masked,
+    ));
+    out.push_str(&fmt_stage(
+        "3. P-DET-02B 50 Headers Revealed",
+        &res.headers_revealed,
+    ));
+    out.push_str(&fmt_stage(
+        "4. P-DET-03 64 KiB Text Body Preview",
+        &res.text_body_preview,
+    ));
+    out.push_str(&fmt_stage(
+        "5. P-DET-04 1 MiB Binary Hexdump Cap",
+        &res.binary_hexdump,
+    ));
+    out.push_str(&fmt_stage(
+        "6. P-DET-05 Store 10k Lookup + Proj",
+        &res.store_lookup_and_projection,
+    ));
+    out.push_str("------------------------------------------------------------------\n");
+    out.push_str("AUDIT & METHODOLOGY NOTES:\n");
+    out.push_str("  • Synthetic in-memory fixtures; zero network I/O.\n");
+    out.push_str("  • std::hint::black_box used on all benchmark outputs to prevent dead-code elimination.\n");
+    out.push_str("  • Warm-up iteration executed prior to measured repetitions.\n");
     out.push_str("==================================================================\n");
     out
 }
@@ -3039,8 +3331,9 @@ fn main() {
         println!("  --pilot-25       Execute controlled pilot scenario N=25 exclusively");
         println!("  --pilot-100      Execute controlled pilot scenario N=100 exclusively");
         println!("  --all            Execute sequential pilot scenarios N=5 and N=25 exclusively");
-        println!("  --inspector-10k  Execute 10k transaction Inspector metadata & filtering pipeline benchmark");
-        println!("  --help, -h       Display this help message");
+        println!("  --inspector-10k      Execute 10k transaction Inspector metadata & filtering pipeline benchmark");
+        println!("  --inspector-details  Execute Inspector details projection & formatting benchmark (P-DET-01..05)");
+        println!("  --help, -h           Display this help message");
         println!();
         println!("Options:");
         println!("  --output-dir <DIR>  Specify custom output directory for evidence files");
@@ -3247,6 +3540,85 @@ fn main() {
         return;
     }
 
+    if config.command == CliCommand::InspectorDetails {
+        let iterations = 200;
+        println!(
+            "\n>>> RUNNING INSPECTOR DETAILS PERFORMANCE BENCHMARK (iterations = {})",
+            iterations
+        );
+        let res = run_inspector_details_benchmark(iterations);
+        let summary = format_inspector_details_summary(&res);
+        print!("{}", summary);
+        log_accumulator.push_str(&summary);
+
+        let mut json_out = String::new();
+        json_out.push_str("{\n");
+        json_out.push_str(&format!("  \"run_id\": \"{}\",\n", escape_json(&run_id)));
+        json_out.push_str(&format!(
+            "  \"timestamp_utc\": \"{}\",\n",
+            escape_json(&timestamp_utc)
+        ));
+        json_out.push_str("  \"command\": \"--inspector-details\",\n");
+        json_out.push_str("  \"status\": \"PASS\",\n");
+        json_out.push_str(&format!(
+            "  \"build_profile\": \"{}\",\n",
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            }
+        ));
+        json_out.push_str(&format!("  \"iterations\": {},\n", iterations));
+        json_out.push_str("  \"benchmarks_us\": {\n");
+        let fmt_stage_json = |s: &SampleStatistics| -> String {
+            format!(
+                "{{\"min\":{:.2},\"p50\":{:.2},\"p95\":{:.2},\"p99\":{:.2},\"max\":{:.2},\"mean\":{:.2},\"std_dev\":{:.2},\"count\":{}}}",
+                s.min, s.median, s.p95(), s.p99(), s.max, s.mean, s.std_dev, s.count
+            )
+        };
+        json_out.push_str(&format!(
+            "    \"p_det_01_std_projection\": {},\n",
+            fmt_stage_json(&res.std_projection)
+        ));
+        json_out.push_str(&format!(
+            "    \"p_det_02_headers_masked\": {},\n",
+            fmt_stage_json(&res.headers_masked)
+        ));
+        json_out.push_str(&format!(
+            "    \"p_det_02_headers_revealed\": {},\n",
+            fmt_stage_json(&res.headers_revealed)
+        ));
+        json_out.push_str(&format!(
+            "    \"p_det_03_text_body_preview\": {},\n",
+            fmt_stage_json(&res.text_body_preview)
+        ));
+        json_out.push_str(&format!(
+            "    \"p_det_04_binary_hexdump\": {},\n",
+            fmt_stage_json(&res.binary_hexdump)
+        ));
+        json_out.push_str(&format!(
+            "    \"p_det_05_store_lookup_and_projection\": {}\n",
+            fmt_stage_json(&res.store_lookup_and_projection)
+        ));
+        json_out.push_str("  }\n");
+        json_out.push_str("}\n");
+
+        match save_evidence_files(&output_dir, &run_id, &log_accumulator, &json_out) {
+            Ok((sum_path, json_path)) => {
+                println!(
+                    "\n>> Inspector details summary saved: {}",
+                    sum_path.display()
+                );
+                println!(">> Inspector details JSON saved: {}", json_path.display());
+            }
+            Err(e) => {
+                eprintln!("ERROR: Failed to save Inspector details evidence: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     let mut prf01_5: Option<ModuleResult> = None;
     let mut prf02_5: Option<ModuleResult> = None;
     let mut e2e_5: Option<E2eScenarioResult> = None;
@@ -3374,6 +3746,7 @@ fn main() {
         CliCommand::Pilot100 => "--pilot-100",
         CliCommand::All => "--all",
         CliCommand::Inspector10k => "--inspector-10k",
+        CliCommand::InspectorDetails => "--inspector-details",
         CliCommand::Help => "--help",
     };
 
@@ -3483,6 +3856,12 @@ mod tests {
             CliCommand::Inspector10k
         );
         assert_eq!(
+            parse_cli_args(&["prog".into(), "--inspector-details".into()])
+                .unwrap()
+                .command,
+            CliCommand::InspectorDetails
+        );
+        assert_eq!(
             parse_cli_args(&["prog".into(), "--help".into()])
                 .unwrap()
                 .command,
@@ -3557,6 +3936,37 @@ mod tests {
         assert_eq!(stats.mean, 30.0);
         assert_eq!(stats.median, 30.0);
         assert!((stats.std_dev - 14.142).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_statistics_p99_computation_and_edge_cases() {
+        // 1. Single sample
+        let single = SampleStatistics::compute(vec![42.0]).unwrap();
+        assert_eq!(single.p99(), 42.0);
+
+        // 2. 100 samples from 1.0 to 100.0
+        let s100: Vec<f64> = (1..=100).map(|i| i as f64).collect();
+        let stats100 = SampleStatistics::compute(s100).unwrap();
+        assert_eq!(stats100.p95(), 95.0);
+        assert_eq!(stats100.p99(), 99.0);
+
+        // 3. 200 samples from 1.0 to 200.0
+        let s200: Vec<f64> = (1..=200).map(|i| i as f64).collect();
+        let stats200 = SampleStatistics::compute(s200).unwrap();
+        assert_eq!(stats200.p95(), 190.0);
+        assert_eq!(stats200.p99(), 198.0);
+
+        // 4. Empty raw_samples edge case
+        let empty = SampleStatistics {
+            raw_samples: Vec::new(),
+            count: 0,
+            min: 0.0,
+            max: 0.0,
+            mean: 0.0,
+            median: 0.0,
+            std_dev: 0.0,
+        };
+        assert_eq!(empty.p99(), 0.0);
     }
 
     #[test]
@@ -4688,6 +5098,93 @@ mod tests {
             parse_cli_args(&["prog".into(), "--inspector-10k".into(), "--validate".into()])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn test_cli_parser_inspector_details_command() {
+        let cfg = parse_cli_args(&["prog".into(), "--inspector-details".into()]).unwrap();
+        assert_eq!(cfg.command, CliCommand::InspectorDetails);
+        assert_eq!(cfg.output_dir, None);
+
+        let cfg_dir = parse_cli_args(&[
+            "prog".into(),
+            "--inspector-details".into(),
+            "--output-dir".into(),
+            "/custom/dir".into(),
+        ])
+        .unwrap();
+        assert_eq!(cfg_dir.command, CliCommand::InspectorDetails);
+        assert_eq!(cfg_dir.output_dir, Some(PathBuf::from("/custom/dir")));
+    }
+
+    #[test]
+    fn test_cli_parser_rejects_conflicting_commands_with_inspector_details() {
+        assert!(parse_cli_args(&[
+            "prog".into(),
+            "--inspector-details".into(),
+            "--pilot-5".into()
+        ])
+        .is_err());
+        assert!(parse_cli_args(&[
+            "prog".into(),
+            "--inspector-details".into(),
+            "--pilot-25".into()
+        ])
+        .is_err());
+        assert!(parse_cli_args(&[
+            "prog".into(),
+            "--inspector-details".into(),
+            "--pilot-100".into()
+        ])
+        .is_err());
+        assert!(
+            parse_cli_args(&["prog".into(), "--inspector-details".into(), "--all".into()]).is_err()
+        );
+        assert!(parse_cli_args(&[
+            "prog".into(),
+            "--inspector-details".into(),
+            "--inspector-10k".into()
+        ])
+        .is_err());
+        assert!(parse_cli_args(&[
+            "prog".into(),
+            "--inspector-details".into(),
+            "--validate".into()
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn test_inspector_details_microbenchmark_smoke() {
+        let res = run_inspector_details_benchmark(2);
+        assert_eq!(res.std_projection.count, 2);
+        assert_eq!(res.headers_masked.count, 2);
+        assert_eq!(res.headers_revealed.count, 2);
+        assert_eq!(res.text_body_preview.count, 2);
+        assert_eq!(res.binary_hexdump.count, 2);
+        assert_eq!(res.store_lookup_and_projection.count, 2);
+        let summary = format_inspector_details_summary(&res);
+        assert!(summary.contains("P-DET-01"));
+        assert!(summary.contains("P-DET-05"));
+        assert!(summary.contains("p99:"));
+    }
+
+    #[test]
+    fn test_inspector_details_report_parity_and_p99() {
+        let res = run_inspector_details_benchmark(5);
+        assert!(res.std_projection.p99() >= res.std_projection.p95());
+        assert!(res.headers_masked.p99() >= res.headers_masked.p95());
+        assert!(res.headers_revealed.p99() >= res.headers_revealed.p95());
+        assert!(res.text_body_preview.p99() >= res.text_body_preview.p95());
+        assert!(res.binary_hexdump.p99() >= res.binary_hexdump.p95());
+        assert!(res.store_lookup_and_projection.p99() >= res.store_lookup_and_projection.p95());
+        let summary = format_inspector_details_summary(&res);
+        assert!(summary.contains("P-DET-01 Standard Projection"));
+        assert!(summary.contains("P-DET-02A 50 Headers Masked"));
+        assert!(summary.contains("P-DET-02B 50 Headers Revealed"));
+        assert!(summary.contains("P-DET-03 64 KiB Text Body Preview"));
+        assert!(summary.contains("P-DET-04 1 MiB Binary Hexdump Cap"));
+        assert!(summary.contains("P-DET-05 Store 10k Lookup + Proj"));
     }
 
     #[test]
