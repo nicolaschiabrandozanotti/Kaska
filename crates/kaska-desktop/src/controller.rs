@@ -2851,4 +2851,335 @@ mod tests {
         assert_eq!(parts[0].len(), 254);
         assert_eq!(parts[1].len(), 1022);
     }
+
+    #[test]
+    fn test_qa_exhaustive_privacy_case_insensitivity_and_synthetic_secrets() {
+        use kaska_http::models::HttpHeader;
+
+        // Test all 6 sensitive header families across various case variations
+        let cases = [
+            ("Authorization", "SYNTHETIC_TEST_SECRET_AUTH_001"),
+            ("AUTHORIZATION", "SYNTHETIC_TEST_SECRET_AUTH_002"),
+            ("authorization", "SYNTHETIC_TEST_SECRET_AUTH_003"),
+            ("Proxy-Authorization", "SYNTHETIC_TEST_SECRET_PROXY_001"),
+            ("PROXY-AUTHORIZATION", "SYNTHETIC_TEST_SECRET_PROXY_002"),
+            ("proxy-authorization", "SYNTHETIC_TEST_SECRET_PROXY_003"),
+            ("Cookie", "SYNTHETIC_TEST_COOKIE_001"),
+            ("COOKIE", "SYNTHETIC_TEST_COOKIE_002"),
+            ("cookie", "SYNTHETIC_TEST_COOKIE_003"),
+            ("Set-Cookie", "SYNTHETIC_TEST_SET_COOKIE_001"),
+            ("SET-COOKIE", "SYNTHETIC_TEST_SET_COOKIE_002"),
+            ("set-cookie", "SYNTHETIC_TEST_SET_COOKIE_003"),
+            ("X-API-Key", "SYNTHETIC_TEST_API_KEY_001"),
+            ("X-Api-Key", "SYNTHETIC_TEST_API_KEY_002"),
+            ("x-api-key", "SYNTHETIC_TEST_API_KEY_003"),
+            ("API-Key", "SYNTHETIC_TEST_API_KEY_004"),
+            ("Api-Key", "SYNTHETIC_TEST_API_KEY_005"),
+            ("api-key", "SYNTHETIC_TEST_API_KEY_006"),
+        ];
+
+        let mut headers = Vec::new();
+        for (name, val) in cases {
+            assert!(
+                is_sensitive_header(name),
+                "Header '{}' must be detected as sensitive",
+                name
+            );
+            headers.push(HttpHeader::new(name, val));
+        }
+
+        // Also add a non-sensitive header to ensure non-sensitive values are never masked
+        headers.push(HttpHeader::new("Content-Type", "application/json"));
+
+        // 1. Table projection when masked
+        let proj_masked = project_headers_to_slint(&headers, false);
+        for item in &proj_masked.items[..cases.len()] {
+            assert!(item.is_sensitive);
+            assert_eq!(item.value.as_str(), MASKED_SECRET_PLACEHOLDER);
+        }
+        let last_item = proj_masked.items.last().unwrap();
+        assert!(!last_item.is_sensitive);
+        assert_eq!(last_item.value.as_str(), "application/json");
+
+        // 2. Table projection when revealed
+        let proj_revealed = project_headers_to_slint(&headers, true);
+        for (i, (_, expected_secret)) in cases.iter().enumerate() {
+            let item = &proj_revealed.items[i];
+            assert!(item.is_sensitive);
+            assert_eq!(item.value.as_str(), *expected_secret);
+        }
+
+        // 3. Text projection when masked
+        let text_masked = project_headers_text(&headers, false);
+        for (_, secret) in cases {
+            assert!(
+                !text_masked.contains(secret),
+                "Masked text must NOT contain secret {}",
+                secret
+            );
+        }
+        assert!(text_masked.contains(MASKED_SECRET_PLACEHOLDER));
+        assert!(text_masked.contains("Content-Type: application/json"));
+
+        // 4. Text projection when revealed
+        let text_revealed = project_headers_text(&headers, true);
+        for (_, secret) in cases {
+            assert!(
+                text_revealed.contains(secret),
+                "Revealed text must contain secret {}",
+                secret
+            );
+        }
+    }
+
+    #[test]
+    fn test_qa_headers_duplicate_preservation_and_empty_values() {
+        use kaska_http::models::HttpHeader;
+
+        let headers = vec![
+            HttpHeader::new("Set-Cookie", "session_id=SYNTHETIC_COOKIE_001; Path=/"),
+            HttpHeader::new("Set-Cookie", "theme=dark; Path=/"),
+            HttpHeader::new("Set-Cookie", "lang=en; Path=/"),
+            HttpHeader::new("X-Custom-Empty", ""),
+            HttpHeader::new("X-Duplicate", "value_alpha"),
+            HttpHeader::new("X-Duplicate", "value_beta"),
+            HttpHeader::new("X-Duplicate", "value_gamma"),
+        ];
+
+        // 1. Structured table preservation
+        let list_masked = project_headers_to_slint(&headers, false);
+        assert_eq!(list_masked.items.len(), 7);
+        assert_eq!(list_masked.items[0].name.as_str(), "Set-Cookie");
+        assert_eq!(
+            list_masked.items[0].value.as_str(),
+            MASKED_SECRET_PLACEHOLDER
+        );
+        assert_eq!(list_masked.items[1].name.as_str(), "Set-Cookie");
+        assert_eq!(
+            list_masked.items[1].value.as_str(),
+            MASKED_SECRET_PLACEHOLDER
+        );
+        assert_eq!(list_masked.items[2].name.as_str(), "Set-Cookie");
+        assert_eq!(
+            list_masked.items[2].value.as_str(),
+            MASKED_SECRET_PLACEHOLDER
+        );
+
+        assert_eq!(list_masked.items[3].name.as_str(), "X-Custom-Empty");
+        assert_eq!(list_masked.items[3].value.as_str(), "");
+        assert!(!list_masked.items[3].is_sensitive);
+
+        assert_eq!(list_masked.items[4].name.as_str(), "X-Duplicate");
+        assert_eq!(list_masked.items[4].value.as_str(), "value_alpha");
+        assert_eq!(list_masked.items[5].name.as_str(), "X-Duplicate");
+        assert_eq!(list_masked.items[5].value.as_str(), "value_beta");
+        assert_eq!(list_masked.items[6].name.as_str(), "X-Duplicate");
+        assert_eq!(list_masked.items[6].value.as_str(), "value_gamma");
+
+        // 2. Text reconstruction preservation
+        let text_masked = project_headers_text(&headers, false);
+        let lines: Vec<&str> = text_masked.lines().collect();
+        assert_eq!(lines.len(), 7);
+        assert_eq!(lines[0], "Set-Cookie: ••••••••");
+        assert_eq!(lines[1], "Set-Cookie: ••••••••");
+        assert_eq!(lines[2], "Set-Cookie: ••••••••");
+        assert_eq!(lines[3], "X-Custom-Empty: ");
+        assert_eq!(lines[4], "X-Duplicate: value_alpha");
+        assert_eq!(lines[5], "X-Duplicate: value_beta");
+        assert_eq!(lines[6], "X-Duplicate: value_gamma");
+    }
+
+    #[test]
+    fn test_qa_reconstructed_start_lines_all_methods() {
+        use kaska_http::models::{HttpMethod, HttpRequest, HttpResponse};
+
+        // Test standard and extended methods
+        let methods = [
+            (
+                HttpMethod::Patch,
+                "/api/v1/resource/42",
+                "id=42",
+                "PATCH /api/v1/resource/42?id=42 HTTP/1.1",
+            ),
+            (HttpMethod::Options, "*", "", "OPTIONS * HTTP/1.1"),
+            (
+                HttpMethod::Delete,
+                "/api/v1/session",
+                "",
+                "DELETE /api/v1/session HTTP/1.1",
+            ),
+            (
+                HttpMethod::Head,
+                "/health",
+                "format=json&verbose=true",
+                "HEAD /health?format=json&verbose=true HTTP/1.1",
+            ),
+        ];
+
+        for (method, path, query, expected) in methods {
+            let raw_url = if query.is_empty() {
+                path.to_string()
+            } else {
+                format!("{}?{}", path, query)
+            };
+            let req = HttpRequest {
+                method,
+                raw_url,
+                host: "127.0.0.1".to_string(),
+                path: path.to_string(),
+                query: query.to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+                http_version: "HTTP/1.1".to_string(),
+            };
+            let line = format_reconstructed_request_line(&req);
+            assert_eq!(line, expected);
+        }
+
+        // Test diverse response status codes
+        let statuses = [
+            (
+                101,
+                "Switching Protocols",
+                "HTTP/1.1 101 Switching Protocols",
+            ),
+            (204, "No Content", "HTTP/1.1 204 No Content"),
+            (304, "Not Modified", "HTTP/1.1 304 Not Modified"),
+            (404, "Not Found", "HTTP/1.1 404 Not Found"),
+            (502, "Bad Gateway", "HTTP/1.1 502 Bad Gateway"),
+        ];
+
+        for (code, reason, expected) in statuses {
+            let resp = HttpResponse {
+                status_code: code,
+                status_text: reason.to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+                http_version: "HTTP/1.1".to_string(),
+            };
+            let line = format_reconstructed_status_line(&resp);
+            assert_eq!(line, expected);
+        }
+    }
+
+    #[test]
+    fn test_qa_traffic_states_lifecycle_and_safe_error() {
+        use kaska_http::models::{
+            HttpHeader, HttpMethod, HttpRequest, HttpTransaction, TransactionState,
+        };
+
+        // 1. Pending transaction
+        let pending_tx = HttpTransaction {
+            id: 1,
+            request: HttpRequest {
+                method: HttpMethod::Get,
+                raw_url: "/pending/test".to_string(),
+                host: "127.0.0.1".to_string(),
+                path: "/pending/test".to_string(),
+                query: String::new(),
+                headers: vec![HttpHeader::new("Host", "127.0.0.1")],
+                body: Vec::new(),
+                http_version: "HTTP/1.1".to_string(),
+            },
+            response: None,
+            duration_ms: 0,
+            state: TransactionState::Pending,
+            timestamp_rfc3339: "2026-10-19T00:00:00Z".to_string(),
+        };
+
+        let proj_pending = compute_transaction_details(Some(&pending_tx), false);
+        assert_eq!(proj_pending.req_line, "GET /pending/test HTTP/1.1");
+        assert_eq!(proj_pending.timing_text, "Status: Pending (In flight)...");
+        assert_eq!(proj_pending.resp_headers_text, "(No response)");
+        assert!(proj_pending.resp_body.is_empty());
+
+        // 2. Completed without response (e.g. connection dropped)
+        let mut completed_no_resp_tx = pending_tx.clone();
+        completed_no_resp_tx.state = TransactionState::Completed;
+
+        let proj_no_resp = compute_transaction_details(Some(&completed_no_resp_tx), false);
+        assert_eq!(proj_no_resp.timing_text, "Status: Completed (No response)");
+        assert_eq!(proj_no_resp.resp_headers_text, "(No response)");
+
+        // 3. Failed with sensitive internal error string
+        let mut failed_tx = pending_tx;
+        failed_tx.state = TransactionState::Failed(
+            "INTERNAL_TCP_ERROR_CODE_999_DATABASE_SECRET_KEY_SYNTHETIC".to_string(),
+        );
+
+        let proj_failed = compute_transaction_details(Some(&failed_tx), false);
+        assert_eq!(proj_failed.timing_text, "Status: Failed");
+        assert_eq!(
+            proj_failed.resp_body,
+            "Transaction failed: No response received from remote server."
+        );
+        // Explicitly assert zero leakage of internal error message in all projection fields
+        assert!(!proj_failed.resp_body.contains("INTERNAL_TCP_ERROR_CODE"));
+        assert!(!proj_failed.timing_text.contains("INTERNAL_TCP_ERROR_CODE"));
+        assert!(!proj_failed
+            .resp_status_line
+            .contains("INTERNAL_TCP_ERROR_CODE"));
+        assert!(!proj_failed
+            .resp_headers_text
+            .contains("INTERNAL_TCP_ERROR_CODE"));
+    }
+
+    #[test]
+    fn test_qa_store_immutability_after_projection() {
+        use kaska_http::models::{
+            HttpHeader, HttpMethod, HttpRequest, HttpTransaction, TransactionState,
+        };
+        use kaska_http::store::TrafficStore;
+
+        let mut store = TrafficStore::new(100);
+        let secret_token = "SYNTHETIC_BEARER_TOKEN_IMMUTABILITY_001";
+        let req = HttpRequest {
+            method: HttpMethod::Post,
+            raw_url: "/api/immutable".to_string(),
+            host: "127.0.0.1".to_string(),
+            path: "/api/immutable".to_string(),
+            query: String::new(),
+            headers: vec![
+                HttpHeader::new("Host", "127.0.0.1"),
+                HttpHeader::new("Authorization", secret_token),
+            ],
+            body: b"Original synthetic body payload".to_vec(),
+            http_version: "HTTP/1.1".to_string(),
+        };
+
+        let tx = HttpTransaction {
+            id: 101,
+            request: req,
+            response: None,
+            duration_ms: 10,
+            state: TransactionState::Completed,
+            timestamp_rfc3339: "2026-10-19T00:00:00Z".to_string(),
+        };
+        let tx_id = store.insert(tx);
+
+        let retrieved = store
+            .get_by_id(tx_id)
+            .expect("Transaction must exist in store");
+
+        // Project masked
+        let proj_masked = compute_transaction_details(Some(retrieved), false);
+        assert!(proj_masked
+            .req_headers_text
+            .contains(MASKED_SECRET_PLACEHOLDER));
+        assert!(!proj_masked.req_headers_text.contains(secret_token));
+
+        // Project revealed
+        let proj_revealed = compute_transaction_details(Some(retrieved), true);
+        assert!(proj_revealed.req_headers_text.contains(secret_token));
+
+        // Verify store immutability
+        let re_retrieved = store
+            .get_by_id(tx_id)
+            .expect("Transaction must still exist");
+        assert_eq!(re_retrieved.request.headers[1].value, secret_token);
+        assert_eq!(
+            re_retrieved.request.body,
+            b"Original synthetic body payload"
+        );
+    }
 }

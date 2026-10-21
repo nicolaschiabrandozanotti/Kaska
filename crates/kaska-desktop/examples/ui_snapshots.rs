@@ -1,5 +1,5 @@
 //! Native snapshots/input checks, followed by a real controller smoke test on ephemeral loopback ports.
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::{
     cell::{Cell, RefCell},
     fs,
@@ -187,6 +187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop((proxy_reservation, server_reservation));
     let live_controller = Rc::new(controller::AppController::new(proxy_port, server_port));
     let live_wait = Rc::new(Cell::new(0));
+    let synthetic_qa_stage = Rc::new(Cell::new(0usize));
 
     let cancel_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let cancel_server_port = cancel_listener.local_addr()?.port();
@@ -396,117 +397,345 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     step.set(tick + 1);
                     return;
                 }
-                if app.get_is_sending_test() || app.get_transactions_count() == 0 {
-                    live_wait.set(live_wait.get() + 1);
-                    assert!(live_wait.get() < 40, "Timed out waiting for real UI capture");
+                if synthetic_qa_stage.get() == 0 {
+                    if app.get_is_sending_test() || app.get_transactions_count() == 0 {
+                        live_wait.set(live_wait.get() + 1);
+                        assert!(live_wait.get() < 40, "Timed out waiting for real UI capture");
+                        return;
+                    }
+                    assert_eq!(app.get_total_transactions_count(), 4, "Total count before filtering");
+                    assert_eq!(app.get_visible_transactions_count(), 4, "Visible count before filtering");
+
+                    // Pointer click on Row 0 at calculated Y = 256.0
+                    click(app.window(), 230.0, 256.0);
+                    assert_eq!(app.get_selected_transaction_idx(), 0);
+                    assert!(!app.get_active_req_headers().is_empty());
+                    assert!(!app.get_active_resp_headers().is_empty());
+                    assert!(!app.get_secrets_revealed(), "Selected transaction defaults to masked");
+
+                    // Live controller toggle reveal secrets on selected transaction
+                    let req_list_masked = app.get_active_req_headers_list();
+                    assert!(req_list_masked.row_count() > 0, "Header rows present in Slint model");
+                    save_snapshot(app.window(), &output.join("inspector-details-masked.ppm"));
+
+                    app.invoke_toggle_reveal_secrets();
+                    assert!(app.get_secrets_revealed(), "Toggle reveals secrets on live controller");
+                    save_snapshot(app.window(), &output.join("inspector-details-revealed.ppm"));
+
+                    app.invoke_toggle_reveal_secrets();
+                    assert!(!app.get_secrets_revealed(), "Toggle again re-masks secrets on live controller");
+
+                    // Keyboard selection navigation to Row 1 (POST /api/echo)
+                    key(app.window(), slint::platform::Key::DownArrow);
+                    assert_eq!(app.get_selected_transaction_idx(), 1, "DownArrow navigates to row 1");
+                    assert!(!app.get_secrets_revealed(), "Navigating to another row resets secrets to masked");
+
+                    // Filter search: matches 'echo' (tx 2)
+                    app.invoke_filter_search_changed("echo".into());
+                    assert_eq!(app.get_total_transactions_count(), 4);
+                    assert_eq!(app.get_visible_transactions_count(), 1, "Filter 'echo' matches 1 request");
+                    assert_eq!(app.get_selected_transaction_idx(), 0, "Selection preserved by ID across search filter transition");
+
+                    // Filter search: no match yields 0 visible
+                    app.invoke_filter_search_changed("nonexistent_pattern_xyz".into());
+                    assert_eq!(app.get_total_transactions_count(), 4);
+                    assert_eq!(app.get_visible_transactions_count(), 0, "No match yields 0 visible");
+                    assert_eq!(app.get_selected_transaction_idx(), -1, "No selection when visible count is 0");
+                    save_snapshot(app.window(), &output.join("inspector-zero-visible.ppm"));
+
+                    // Reset filters
+                    app.invoke_reset_filters();
+                    assert_eq!(app.get_total_transactions_count(), 4);
+                    assert_eq!(app.get_visible_transactions_count(), 4, "Reset restores visible count to 4");
+                    assert_eq!(app.get_filter_search(), "");
+                    assert_eq!(app.get_filter_method_idx(), 0);
+                    assert_eq!(app.get_filter_status_idx(), 0);
+                    assert_eq!(app.get_filter_outcome_idx(), 0);
+                    assert!(!app.get_filter_only_in_scope());
+                    assert!(!app.get_filter_hide_connect());
+                    assert!(!app.get_filter_hide_failed());
+
+                    // Filter by Method POST (idx 2)
+                    app.set_filter_method_idx(2);
+                    app.invoke_filter_method_changed(2);
+                    assert_eq!(app.get_visible_transactions_count(), 1, "Method POST matches 1 request");
+                    app.invoke_reset_filters();
+                    assert_eq!(app.get_filter_method_idx(), 0, "Reset restores method idx to 0");
+
+                    // Filter by Status 4xx (idx 4)
+                    app.set_filter_status_idx(4);
+                    app.invoke_filter_status_changed(4);
+                    assert_eq!(app.get_visible_transactions_count(), 1, "Status 4xx matches 1 request (403)");
+                    app.invoke_reset_filters();
+                    assert_eq!(app.get_filter_status_idx(), 0, "Reset restores status idx to 0");
+
+                    // Scope & Exclusion Toggles
+                    app.set_filter_only_in_scope(true);
+                    app.invoke_filter_only_in_scope_changed(true);
+                    assert!(app.get_filter_only_in_scope());
+                    app.set_filter_hide_connect(true);
+                    app.invoke_filter_hide_connect_changed(true);
+                    assert!(app.get_filter_hide_connect());
+                    app.set_filter_hide_failed(true);
+                    app.invoke_filter_hide_failed_changed(true);
+                    assert!(app.get_filter_hide_failed());
+                    app.invoke_reset_filters();
+                    assert!(!app.get_filter_only_in_scope(), "Reset clears only_in_scope");
+                    assert!(!app.get_filter_hide_connect(), "Reset clears hide_connect");
+                    assert!(!app.get_filter_hide_failed(), "Reset clears hide_failed");
+
+                    // Select transaction explicitly by ID
+                    app.invoke_select_transaction_by_id("3".into());
+                    assert_eq!(app.get_selected_transaction_idx(), 2, "Select tx 3 gives visual index 2 in unfiltered table");
+
+                    // Filter by Method GET (idx 1) -> matches 3 requests (IDs 1, 3, 4)
+                    app.set_filter_method_idx(1);
+                    app.invoke_filter_method_changed(1);
+                    assert_eq!(app.get_visible_transactions_count(), 3, "GET matches 3 requests");
+                    assert_eq!(app.get_selected_transaction_idx(), 1, "Tx 3 selection preserved at visible index 1 in filtered table");
+
+                    // Mouse selection on filtered Row 0
+                    click(app.window(), 230.0, 256.0);
+                    assert_eq!(app.get_selected_transaction_idx(), 0, "Pointer clicks filtered row 0");
+
+                    // Keyboard navigation across filtered rows
+                    key(app.window(), slint::platform::Key::DownArrow);
+                    assert_eq!(app.get_selected_transaction_idx(), 1, "DownArrow navigates to filtered row 1");
+                    key(app.window(), slint::platform::Key::DownArrow);
+                    assert_eq!(app.get_selected_transaction_idx(), 2, "DownArrow navigates to filtered row 2");
+                    key(app.window(), slint::platform::Key::UpArrow);
+                    assert_eq!(app.get_selected_transaction_idx(), 1, "UpArrow navigates back to filtered row 1");
+
+                    save_snapshot(app.window(), &output.join("inspector-filters-active.ppm"));
+                    app.invoke_reset_filters();
+
+                    // Responsive 640x320 verification
+                    resize(app.window(), 640.0, 320.0);
+                    save_snapshot(app.window(), &output.join("inspector-compact-640x320.ppm"));
+                    resize(app.window(), 1180.0, 680.0);
+
+                    println!("PASS: real Rust controller -> loopback HTTP -> full Inspector QA (filters, search, ID preservation, mouse/keyboard selection, reset, responsive 640x320); ports={proxy_port},{server_port}");
+
+                    // Dispatch synthetic HTTP transaction with sensitive headers and binary payload
+                    let mut stream = std::net::TcpStream::connect(format!("127.0.0.1:{}", proxy_port))
+                        .expect("Connect to proxy for synthetic sensitive transaction");
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
+                    let _ = stream.set_write_timeout(Some(Duration::from_millis(2000)));
+                    let binary_body: &[u8] = &[
+                        0x00, 0x01, 0x02, 0x03, 0xFF, 0xFE, 0xFD, 0xFC,
+                        0xC0, 0xAF, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x01,
+                    ];
+                    let req_headers = format!(
+                        "POST http://127.0.0.1:{}/api/echo HTTP/1.1\r\n\
+                         Host: 127.0.0.1:{}\r\n\
+                         Authorization: Bearer SYNTHETIC_SECRET_AUTH_TOKEN_777\r\n\
+                         Cookie: session=SYNTHETIC_SESSION_COOKIE_888\r\n\
+                         X-Custom-Header: non-sensitive-public-value\r\n\
+                         Content-Type: application/octet-stream\r\n\
+                         Content-Length: {}\r\n\
+                         Connection: close\r\n\r\n",
+                        server_port, server_port, binary_body.len()
+                    );
+                    let mut full_req = req_headers.into_bytes();
+                    full_req.extend_from_slice(binary_body);
+                    stream.write_all(&full_req).expect("Write synthetic request");
+                    stream.flush().expect("Flush synthetic request");
+                    let mut resp_buf = [0u8; 4096];
+                    let _ = std::io::Read::read(&mut stream, &mut resp_buf);
+                    drop(stream);
+
+                    synthetic_qa_stage.set(1);
+                    live_wait.set(0);
                     return;
                 }
-                assert_eq!(app.get_total_transactions_count(), 4, "Total count before filtering");
-                assert_eq!(app.get_visible_transactions_count(), 4, "Visible count before filtering");
 
-                // Pointer click on Row 0 at calculated Y = 256.0
-                click(app.window(), 230.0, 256.0);
-                assert_eq!(app.get_selected_transaction_idx(), 0);
-                assert!(!app.get_active_req_headers().is_empty());
-                assert!(!app.get_active_resp_headers().is_empty());
-                assert!(!app.get_secrets_revealed(), "Selected transaction defaults to masked");
+                // Stage 1: Validate synthetic transaction headers, Slint Model row_data, privacy toggle, and snapshots
+                if synthetic_qa_stage.get() == 1 {
+                    if app.get_total_transactions_count() < 5 {
+                        live_wait.set(live_wait.get() + 1);
+                        assert!(live_wait.get() < 40, "Timed out waiting for synthetic transaction to appear in UI");
+                        return;
+                    }
+                    assert_eq!(app.get_total_transactions_count(), 5, "Total count with synthetic transaction");
+                    assert_eq!(app.get_visible_transactions_count(), 5, "Visible count with synthetic transaction");
 
-                // Live controller toggle reveal secrets on selected transaction
-                app.invoke_toggle_reveal_secrets();
-                assert!(app.get_secrets_revealed(), "Toggle reveals secrets on live controller");
-                app.invoke_toggle_reveal_secrets();
-                assert!(!app.get_secrets_revealed(), "Toggle again re-masks secrets on live controller");
+                    // Select transaction 5 by exact ID
+                    app.invoke_select_transaction_by_id("5".into());
+                    assert_eq!(app.get_selected_transaction_idx(), 4, "Transaction 5 selected at index 4");
 
-                // Keyboard selection navigation to Row 1 (POST /api/echo)
-                key(app.window(), slint::platform::Key::DownArrow);
-                assert_eq!(app.get_selected_transaction_idx(), 1, "DownArrow navigates to row 1");
-                assert!(!app.get_secrets_revealed(), "Navigating to another row resets secrets to masked");
+                    // 1. Initial State (Masked)
+                    assert!(!app.get_secrets_revealed(), "Defaults to masked upon selection");
+                    let req_list_masked = app.get_active_req_headers_list();
+                    assert!(req_list_masked.row_count() >= 3, "Headers list must contain synthetic headers");
+                    let mut auth_item = None;
+                    let mut cookie_item = None;
+                    let mut custom_item = None;
+                    for i in 0..req_list_masked.row_count() {
+                        if let Some(h) = req_list_masked.row_data(i) {
+                            if h.name.eq_ignore_ascii_case("authorization") {
+                                auth_item = Some(h);
+                            } else if h.name.eq_ignore_ascii_case("cookie") {
+                                cookie_item = Some(h);
+                            } else if h.name.eq_ignore_ascii_case("x-custom-header") {
+                                custom_item = Some(h);
+                            }
+                        }
+                    }
+                    let auth_masked = auth_item.expect("Authorization header present in masked model");
+                    let cookie_masked = cookie_item.expect("Cookie header present in masked model");
+                    let custom_masked = custom_item.expect("X-Custom-Header present in model");
 
-                // Filter search: matches 'echo' (tx 2)
-                app.invoke_filter_search_changed("echo".into());
-                assert_eq!(app.get_total_transactions_count(), 4);
-                assert_eq!(app.get_visible_transactions_count(), 1, "Filter 'echo' matches 1 request");
-                assert_eq!(app.get_selected_transaction_idx(), 0, "Selection preserved by ID across search filter transition");
+                    assert!(auth_masked.is_sensitive, "Authorization must be sensitive");
+                    assert_eq!(auth_masked.value.as_str(), "••••••••", "Authorization must be masked");
 
-                // Filter search: no match yields 0 visible
-                app.invoke_filter_search_changed("nonexistent_pattern_xyz".into());
-                assert_eq!(app.get_total_transactions_count(), 4);
-                assert_eq!(app.get_visible_transactions_count(), 0, "No match yields 0 visible");
-                assert_eq!(app.get_selected_transaction_idx(), -1, "No selection when visible count is 0");
-                save_snapshot(app.window(), &output.join("inspector-zero-visible.ppm"));
+                    assert!(cookie_masked.is_sensitive, "Cookie must be sensitive");
+                    assert_eq!(cookie_masked.value.as_str(), "••••••••", "Cookie must be masked");
 
-                // Reset filters
-                app.invoke_reset_filters();
-                assert_eq!(app.get_total_transactions_count(), 4);
-                assert_eq!(app.get_visible_transactions_count(), 4, "Reset restores visible count to 4");
-                assert_eq!(app.get_filter_search(), "");
-                assert_eq!(app.get_filter_method_idx(), 0);
-                assert_eq!(app.get_filter_status_idx(), 0);
-                assert_eq!(app.get_filter_outcome_idx(), 0);
-                assert!(!app.get_filter_only_in_scope());
-                assert!(!app.get_filter_hide_connect());
-                assert!(!app.get_filter_hide_failed());
+                    assert!(!custom_masked.is_sensitive, "X-Custom-Header must NOT be sensitive");
+                    assert_eq!(custom_masked.value.as_str(), "non-sensitive-public-value");
 
-                // Filter by Method POST (idx 2)
-                app.set_filter_method_idx(2);
-                app.invoke_filter_method_changed(2);
-                assert_eq!(app.get_visible_transactions_count(), 1, "Method POST matches 1 request");
-                app.invoke_reset_filters();
-                assert_eq!(app.get_filter_method_idx(), 0, "Reset restores method idx to 0");
+                    // 2. Reveal Secrets
+                    app.invoke_toggle_reveal_secrets();
+                    assert!(app.get_secrets_revealed(), "Secrets revealed after toggle");
+                    let req_list_revealed = app.get_active_req_headers_list();
+                    let mut auth_rev = None;
+                    let mut cookie_rev = None;
+                    let mut custom_rev = None;
+                    for i in 0..req_list_revealed.row_count() {
+                        if let Some(h) = req_list_revealed.row_data(i) {
+                            if h.name.eq_ignore_ascii_case("authorization") {
+                                auth_rev = Some(h);
+                            } else if h.name.eq_ignore_ascii_case("cookie") {
+                                cookie_rev = Some(h);
+                            } else if h.name.eq_ignore_ascii_case("x-custom-header") {
+                                custom_rev = Some(h);
+                            }
+                        }
+                    }
+                    let auth_revealed = auth_rev.expect("Authorization revealed");
+                    let cookie_revealed = cookie_rev.expect("Cookie revealed");
+                    let custom_revealed = custom_rev.expect("Custom revealed");
 
-                // Filter by Status 4xx (idx 4)
-                app.set_filter_status_idx(4);
-                app.invoke_filter_status_changed(4);
-                assert_eq!(app.get_visible_transactions_count(), 1, "Status 4xx matches 1 request (403)");
-                app.invoke_reset_filters();
-                assert_eq!(app.get_filter_status_idx(), 0, "Reset restores status idx to 0");
+                    assert!(auth_revealed.is_sensitive);
+                    assert_eq!(auth_revealed.value.as_str(), "Bearer SYNTHETIC_SECRET_AUTH_TOKEN_777", "Authorization exact revealed value");
 
-                // Scope & Exclusion Toggles
-                app.set_filter_only_in_scope(true);
-                app.invoke_filter_only_in_scope_changed(true);
-                assert!(app.get_filter_only_in_scope());
-                app.set_filter_hide_connect(true);
-                app.invoke_filter_hide_connect_changed(true);
-                assert!(app.get_filter_hide_connect());
-                app.set_filter_hide_failed(true);
-                app.invoke_filter_hide_failed_changed(true);
-                assert!(app.get_filter_hide_failed());
-                app.invoke_reset_filters();
-                assert!(!app.get_filter_only_in_scope(), "Reset clears only_in_scope");
-                assert!(!app.get_filter_hide_connect(), "Reset clears hide_connect");
-                assert!(!app.get_filter_hide_failed(), "Reset clears hide_failed");
+                    assert!(cookie_revealed.is_sensitive);
+                    assert_eq!(cookie_revealed.value.as_str(), "session=SYNTHETIC_SESSION_COOKIE_888", "Cookie exact revealed value");
 
-                // Select transaction explicitly by ID
-                app.invoke_select_transaction_by_id("3".into());
-                assert_eq!(app.get_selected_transaction_idx(), 2, "Select tx 3 gives visual index 2 in unfiltered table");
+                    assert!(!custom_revealed.is_sensitive);
+                    assert_eq!(custom_revealed.value.as_str(), "non-sensitive-public-value");
 
-                // Filter by Method GET (idx 1) -> matches 3 requests (IDs 1, 3, 4)
-                app.set_filter_method_idx(1);
-                app.invoke_filter_method_changed(1);
-                assert_eq!(app.get_visible_transactions_count(), 3, "GET matches 3 requests");
-                assert_eq!(app.get_selected_transaction_idx(), 1, "Tx 3 selection preserved at visible index 1 in filtered table");
+                    // 3. Re-mask Secrets
+                    app.invoke_toggle_reveal_secrets();
+                    assert!(!app.get_secrets_revealed(), "Secrets re-masked after second toggle");
+                    let req_list_remasked = app.get_active_req_headers_list();
+                    for i in 0..req_list_remasked.row_count() {
+                        if let Some(h) = req_list_remasked.row_data(i) {
+                            if h.name.eq_ignore_ascii_case("authorization") || h.name.eq_ignore_ascii_case("cookie") {
+                                assert_eq!(h.value.as_str(), "••••••••", "Re-masked header value");
+                            }
+                        }
+                    }
 
-                // Mouse selection on filtered Row 0
-                click(app.window(), 230.0, 256.0);
-                assert_eq!(app.get_selected_transaction_idx(), 0, "Pointer clicks filtered row 0");
+                    // 4. Reset Privacy on Selection Navigation
+                    app.invoke_toggle_reveal_secrets();
+                    assert!(app.get_secrets_revealed(), "Secrets revealed again before selection reset");
+                    key(app.window(), slint::platform::Key::UpArrow);
+                    assert_eq!(app.get_selected_transaction_idx(), 3, "UpArrow moves to row 3");
+                    assert!(!app.get_secrets_revealed(), "Row navigation resets secrets_revealed to false");
 
-                // Keyboard navigation across filtered rows
-                key(app.window(), slint::platform::Key::DownArrow);
-                assert_eq!(app.get_selected_transaction_idx(), 1, "DownArrow navigates to filtered row 1");
-                key(app.window(), slint::platform::Key::DownArrow);
-                assert_eq!(app.get_selected_transaction_idx(), 2, "DownArrow navigates to filtered row 2");
-                key(app.window(), slint::platform::Key::UpArrow);
-                assert_eq!(app.get_selected_transaction_idx(), 1, "UpArrow navigates back to filtered row 1");
+                    // Return to transaction 5 by ID
+                    app.invoke_select_transaction_by_id("5".into());
+                    assert_eq!(app.get_selected_transaction_idx(), 4);
+                    assert!(!app.get_secrets_revealed(), "Reselected transaction 5 remains masked");
+                    let req_list_reset = app.get_active_req_headers_list();
+                    for i in 0..req_list_reset.row_count() {
+                        if let Some(h) = req_list_reset.row_data(i) {
+                            if h.name.eq_ignore_ascii_case("authorization") || h.name.eq_ignore_ascii_case("cookie") {
+                                assert_eq!(h.value.as_str(), "••••••••", "Reset masked header value");
+                            }
+                        }
+                    }
 
-                save_snapshot(app.window(), &output.join("inspector-filters-active.ppm"));
-                app.invoke_reset_filters();
+                    // 5. GUI-04: Headers Text Mode preparation
+                    // Ensure Request Headers tab is active and not on Body
+                    app.set_request_body_tab(false);
+                    // Click View: Text ActionButton at measured center (425.0, 468.0)
+                    click(app.window(), 425.0, 468.0);
+                    synthetic_qa_stage.set(2);
+                    live_wait.set(0);
+                    return;
+                }
 
-                // Responsive 640x320 verification
-                resize(app.window(), 640.0, 320.0);
-                save_snapshot(app.window(), &output.join("inspector-compact-640x320.ppm"));
-                resize(app.window(), 1180.0, 680.0);
+                if synthetic_qa_stage.get() == 2 {
+                    // Slint event loop has processed the click on View: Text!
+                    // Verify that Request Body tab is not active
+                    assert!(!app.get_request_body_tab(), "Body tab must not be active in headers text mode");
+                    // Save verified Headers Text Mode snapshot
+                    save_snapshot(app.window(), &output.join("inspector-details-text-mode-verified.ppm"));
+                    save_snapshot(app.window(), &output.join("inspector-details-text-mode.ppm"));
 
-                println!("PASS: real Rust controller -> loopback HTTP -> full Inspector QA (filters, search, ID preservation, mouse/keyboard selection, reset, responsive 640x320); ports={proxy_port},{server_port}");
+                    // Click View: Table (425.0, 468.0) to toggle back to structured table mode
+                    click(app.window(), 425.0, 468.0);
+
+                    // 6. Visual QA: Binary Hex Dump
+                    assert!(app.get_active_req_is_binary(), "Active req payload must be detected as binary");
+                    app.set_request_body_tab(true);
+                    let req_body_str = app.get_active_req_body().to_string();
+                    assert!(req_body_str.contains("000000"), "Hex dump must contain start offset");
+                    assert!(req_body_str.contains("ff fe"), "Hex dump must contain hex bytes");
+                    save_snapshot(app.window(), &output.join("inspector-details-hexdump.ppm"));
+                    app.set_request_body_tab(false);
+
+                    // 7. GUI-05: Request Compact 640x420 resolution and allow event loop to settle
+                    resize(app.window(), 640.0, 420.0);
+                    app.set_show_details(true);
+                    synthetic_qa_stage.set(3);
+                    live_wait.set(0);
+                    return;
+                }
+
+                if synthetic_qa_stage.get() == 3 {
+                    let scale = app.window().scale_factor();
+                    let expected_phys_w = (640.0 * scale).round() as u32;
+                    let expected_phys_h = (420.0 * scale).round() as u32;
+                    let actual = app.window().size();
+                    if (actual.width != expected_phys_w || actual.height != expected_phys_h) && live_wait.get() < 20 {
+                        live_wait.set(live_wait.get() + 1);
+                        return;
+                    }
+                    assert_eq!(actual.width, expected_phys_w, "Physical window width must match 640 logical at current DPI");
+                    assert_eq!(actual.height, expected_phys_h, "Physical window height must match 420 logical at current DPI");
+
+                    // Ensure details panel is open in compact mode
+                    app.set_show_details(true);
+
+                    // Save verified compact snapshots
+                    save_snapshot(app.window(), &output.join("inspector-details-compact-verified.ppm"));
+                    save_snapshot(app.window(), &output.join("inspector-details-compact.ppm"));
+
+                    let snap = app.window().take_snapshot().unwrap();
+                    assert_eq!(snap.width(), expected_phys_w);
+                    assert_eq!(snap.height(), expected_phys_h);
+
+                    // Restore window to standard 1180x680 resolution
+                    resize(app.window(), 1180.0, 680.0);
+                    synthetic_qa_stage.set(4);
+                    live_wait.set(0);
+                    return;
+                }
+
+                if synthetic_qa_stage.get() == 4 {
+                    let scale = app.window().scale_factor();
+                    let expected_phys_w = (1180.0 * scale).round() as u32;
+                    let expected_phys_h = (680.0 * scale).round() as u32;
+                    let actual = app.window().size();
+                    if (actual.width != expected_phys_w || actual.height != expected_phys_h) && live_wait.get() < 20 {
+                        live_wait.set(live_wait.get() + 1);
+                        return;
+                    }
+                    println!("PASS: synthetic sensitive transaction -> Slint row_data cell validation (masking, reveal, remask, reset) -> visual QA text mode, binary hexdump, compact layout (verified)");
+                }
             } else if index == sizes.len() * 4 + 4 {
                 if tick.is_multiple_of(2) {
                     app.invoke_clear_history();

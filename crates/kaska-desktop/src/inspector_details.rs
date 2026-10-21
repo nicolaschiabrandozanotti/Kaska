@@ -698,4 +698,58 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn test_qa_synthetic_json_payload_formatting() {
+        let mut json = String::from("{\"items\": [");
+        for i in 0..1000 {
+            if i > 0 {
+                json.push_str(", ");
+            }
+            json.push_str(&format!(
+                "{{\"id\": {}, \"name\": \"SYNTHETIC_ITEM_{:04}\", \"active\": true}}",
+                i, i
+            ));
+        }
+        json.push_str("]}");
+        assert!(json.len() > 10_000 && json.len() < DEFAULT_PREVIEW_BUDGET);
+
+        let preview = format_inspector_body(json.as_bytes());
+        assert!(!preview.is_binary);
+        assert!(!preview.preview_truncated);
+        assert_eq!(preview.rendered_bytes, json.len());
+        assert_eq!(preview.text, json);
+    }
+
+    #[test]
+    fn test_qa_embedded_invalid_utf8_sequence_triggers_hexdump() {
+        let mut payload =
+            b"GET /api/v1/test HTTP/1.1\r\nContent-Type: application/octet-stream\r\n\r\n".to_vec();
+        payload.extend_from_slice(&[0xFF, 0xFE, 0xC0, 0xAF]); // Invalid UTF-8 bytes
+        payload.extend_from_slice(b"Footer data line");
+
+        let preview = format_inspector_body(&payload);
+        assert!(preview.is_binary);
+        assert!(preview.text.contains("Binary / non-textual payload"));
+        assert!(preview.text.contains("000000: "));
+        assert!(preview.text.contains("ff fe c0 af"));
+    }
+
+    #[test]
+    fn test_qa_body_preview_budget_bounds_clamping() {
+        assert_eq!(clamp_preview_budget(0), MIN_PREVIEW_BUDGET);
+        assert_eq!(clamp_preview_budget(100), MIN_PREVIEW_BUDGET);
+        assert_eq!(clamp_preview_budget(500), 500);
+        assert_eq!(clamp_preview_budget(1_000_000), MAX_PREVIEW_BUDGET);
+
+        let data = "A".repeat(5000);
+        let preview_min = format_inspector_body_preview(
+            data.as_bytes(),
+            CaptureTruncation::Unknown,
+            MIN_PREVIEW_BUDGET,
+        );
+        assert!(preview_min.preview_truncated);
+        assert!(preview_min.text.len() <= MIN_PREVIEW_BUDGET);
+        assert!(preview_min.text.contains("[Preview truncated: showing"));
+    }
 }
