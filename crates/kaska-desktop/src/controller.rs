@@ -12,6 +12,9 @@ pub mod repeater_adapter;
 #[path = "inspector_details.rs"]
 pub mod inspector_details;
 
+#[path = "privacy.rs"]
+pub mod privacy;
+
 use crate::filter::{FilterState, HttpStatusFilter, MethodFilter, OutcomeFilter};
 use crate::platform::PlatformInfo;
 use crate::{AppWindow, HeaderItem, TrafficItem};
@@ -91,12 +94,9 @@ pub const MAX_HEADERS_TEXT_BUDGET: usize = 64 * 1024;
 pub const MASKED_SECRET_PLACEHOLDER: &str = "••••••••";
 
 /// Checks if an HTTP header name matches known sensitive credentials (case-insensitive).
+/// Delegates directly to the canonical detector in `crate::privacy::is_sensitive_header`.
 pub fn is_sensitive_header(name: &str) -> bool {
-    let lower = name.trim().to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key" | "api-key"
-    )
+    privacy::is_sensitive_header(name)
 }
 
 /// Truncates string to `max_bytes` on a valid UTF-8 character boundary.

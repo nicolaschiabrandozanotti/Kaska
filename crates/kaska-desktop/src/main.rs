@@ -1,6 +1,8 @@
 pub mod controller;
 pub mod filter;
+pub mod inspector_bridge;
 pub mod platform;
+pub use controller::privacy;
 
 slint::include_modules!();
 
