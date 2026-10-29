@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="476" viewBox="0 0 1440 476" role="img" aria-label="Kaska Native Security Lab, banner abstracto en negro y verde">
+<defs>
+ <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#080d0b"/><stop offset=".58" stop-color="#0c1511"/><stop offset="1" stop-color="#0e2418"/></linearGradient>
+ <linearGradient id="green" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#b1ffd6"/><stop offset=".55" stop-color="#3feaa0"/><stop offset="1" stop-color="#0c9c63"/></linearGradient>
+ <radialGradient id="glow"><stop stop-color="#0edc79" stop-opacity=".17"/><stop offset="1" stop-color="#0edc79" stop-opacity="0"/></radialGradient>
+ <pattern id="grid" width="38" height="38" patternUnits="userSpaceOnUse"><path d="M38 0H0V38" fill="none" stroke="#204c35" stroke-width="1" opacity=".29"/></pattern>
+ <filter id="blur"><feGaussianBlur stdDeviation="2"/></filter>
+</defs>
+<rect width="1440" height="476" rx="24" fill="url(#bg)"/>
+<rect width="1440" height="476" rx="24" fill="url(#grid)"/>
+<ellipse cx="1195" cy="210" rx="370" ry="330" fill="url(#glow)"/>
+<rect x="1" y="1" width="1438" height="474" rx="23" fill="none" stroke="#254c39" stroke-width="2"/>
+<!-- logo icon -->
+<rect x="88" y="74" width="91" height="91" rx="24" fill="#153927" stroke="#3be58f" stroke-width="2"/>
+<path d="M118 95V143 M149 95L119 120 M131 115L153 144" fill="none" stroke="url(#green)" stroke-linecap="square" stroke-linejoin="round" stroke-width="11"/>
+<text x="199" y="114" font-family="Segoe UI,Arial,sans-serif" font-size="19" font-weight="700" letter-spacing="5" fill="#7ee5ac">NATIVE SECURITY LAB</text>
+<text x="83" y="279" font-family="Segoe UI,Arial,sans-serif" font-size="112" font-weight="850" letter-spacing="-5" fill="#f0fff5">KASKA<tspan fill="#49eb9c">.</tspan></text>
+<text x="89" y="331" font-family="Segoe UI,Arial,sans-serif" font-size="24" fill="#b4cbc0">HTTP inspection, built in Rust.</text>
+<rect x="88" y="370" width="134" height="42" rx="11" fill="#172f22" stroke="#315e44"/><text x="155" y="397" font-family="Segoe UI,Arial,sans-serif" fill="#b3f9cc" text-anchor="middle" font-size="15" font-weight="700">RUST</text>
+<rect x="238" y="370" width="134" height="42" rx="11" fill="#172f22" stroke="#315e44"/><text x="305" y="397" font-family="Segoe UI,Arial,sans-serif" fill="#b3f9cc" text-anchor="middle" font-size="15" font-weight="700">SLINT</text>
+<rect x="388" y="370" width="150" height="42" rx="11" fill="#172f22" stroke="#315e44"/><text x="463" y="397" font-family="Segoe UI,Arial,sans-serif" fill="#b3f9cc" text-anchor="middle" font-size="15" font-weight="700">HTTP / 1.1</text>
+<!-- right wire visualization -->
+<path d="M700 0V476" stroke="#214c36" stroke-width="2" opacity=".7"/>
+<rect x="757" y="69" width="592" height="341" rx="16" fill="#0a1511" stroke="#2c5a41" stroke-width="2"/>
+<rect x="757" y="69" width="592" height="52" rx="16" fill="#15261d"/>
+<path d="M757 105H1349" stroke="#29523b"/>
+<circle cx="784" cy="95" r="6" fill="#3c7153"/><circle cx="806" cy="95" r="6" fill="#3c7153"/><circle cx="828" cy="95" r="6" fill="#3c7153"/>
+<text x="860" y="100" font-family="Consolas,monospace" font-size="14" fill="#92b49f">kaska / traffic-flow</text>
+<rect x="780" y="143" width="174" height="55" rx="8" fill="#173126" stroke="#449b67"/>
+<text x="797" y="166" font-family="Consolas,monospace" font-size="12" fill="#7deaaa">REQUEST</text><text x="797" y="184" font-family="Consolas,monospace" font-size="13" fill="#edfff1">GET /api/status</text>
+<rect x="1163" y="294" width="164" height="75" rx="8" fill="#173126" stroke="#449b67"/>
+<text x="1180" y="317" font-family="Consolas,monospace" font-size="12" fill="#7deaaa">RESPONSE</text><text x="1180" y="340" font-family="Consolas,monospace" font-size="20" font-weight="700" fill="#a8ffd0">200 OK</text>
+<path d="M953 171H1028C1043 171 1044 185 1044 196V220H1119V284H1243V294" fill="none" stroke="#43df90" stroke-width="3"/>
+<path d="M1044 225H1002V270H931V336H1148" fill="none" stroke="#285d42" stroke-width="3"/>
+<path d="M876 198V269H940V311H1000" fill="none" stroke="#285d42" stroke-width="3"/>
+<circle cx="1044" cy="220" r="8" fill="#76ffc0"/><circle cx="1119" cy="284" r="8" fill="#76ffc0"/><circle cx="931" cy="336" r="6" fill="#4cc184"/><circle cx="1002" cy="270" r="6" fill="#4cc184"/>
+<rect x="782" y="299" width="117" height="65" rx="8" fill="#0f2319" stroke="#295f42"/>
+<text x="797" y="322" font-family="Consolas,monospace" font-size="12" fill="#74d6a0">SCOPE</text><text x="797" y="343" font-family="Consolas,monospace" font-size="15" fill="#e8fff0">127.0.0.1</text>
+<path d="M899 331H929" stroke="#3fe99a" stroke-width="2" stroke-dasharray="5 6"/>
+<text x="1035" y="174" font-family="Consolas,monospace" font-size="12" fill="#72a990">loopback only</text>
+<text x="1022" y="387" font-family="Consolas,monospace" font-size="11" fill="#688d75">NATIVE ENGINE // EXPERIMENTAL</text>
+</svg>
