@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="812" viewBox="0 0 1440 812" role="img" aria-label="Conceptual workspace layout for Kaska. Not a screenshot.">
+<defs>
+<linearGradient id="base" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#09110d"/><stop offset="1" stop-color="#0f1b14"/></linearGradient>
+<linearGradient id="accent" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#3be58e"/><stop offset="1" stop-color="#9cffd1"/></linearGradient>
+</defs>
+<rect width="1440" height="812" rx="20" fill="url(#base)"/>
+<rect x="1" y="1" width="1438" height="810" rx="19" fill="none" stroke="#2a5840" stroke-width="2"/>
+<rect x="34" y="35" width="1372" height="739" rx="17" fill="#111916" stroke="#365a43"/>
+<rect x="35" y="36" width="216" height="737" rx="16" fill="#15211a"/>
+<path d="M251 36V774" stroke="#2b4d3a"/>
+<rect x="65" y="60" width="41" height="41" rx="11" fill="#1b462e" stroke="#4ce599"/>
+<path d="M80 69V92 M96 69L80 82 M86 80L98 92" stroke="#97ffd1" stroke-width="5" fill="none"/>
+<text x="119" y="89" font-family="Segoe UI,Arial,sans-serif" font-weight="800" font-size="25" fill="#f4fff7">Kaska</text>
+<text x="63" y="144" font-family="Consolas,monospace" font-size="12" fill="#608f73" letter-spacing="1">WORKSPACE</text>
+<rect x="51" y="169" width="185" height="46" rx="8" fill="#245037"/>
+<rect x="51" y="169" width="4" height="46" rx="2" fill="#66f5ab"/>
+<text x="72" y="198" font-family="Segoe UI,Arial,sans-serif" font-size="16" font-weight="700" fill="#effff4">◫  Inspector</text>
+<text x="72" y="255" font-family="Segoe UI,Arial,sans-serif" font-size="16" fill="#a2b7a8">↻  HTTP Repeater</text>
+<text x="72" y="308" font-family="Segoe UI,Arial,sans-serif" font-size="16" fill="#a2b7a8">◎  Target Scope</text>
+<text x="72" y="361" font-family="Segoe UI,Arial,sans-serif" font-size="16" fill="#a2b7a8">⚙  Settings</text>
+<path d="M64 696H229" stroke="#344c3b"/>
+<circle cx="74" cy="727" r="5" fill="#6ced9b"/>
+<text x="88" y="733" font-family="Consolas,monospace" font-size="11" fill="#87b89b">LOCAL LAB · READY</text>
+<text x="286" y="82" font-family="Segoe UI,Arial,sans-serif" font-size="30" font-weight="750" fill="#f2fff6">Network Inspector</text>
+<text x="289" y="108" font-family="Segoe UI,Arial,sans-serif" font-size="14" fill="#95b1a0">Inspect HTTP traffic through the local capture proxy.</text>
+<rect x="1257" y="67" width="116" height="37" rx="8" fill="#245839" stroke="#4a9361"/>
+<text x="1315" y="92" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#bdfbd2">● Capturing</text>
+<path d="M252 128H1405" stroke="#293e32"/>
+<rect x="284" y="148" width="1090" height="89" rx="10" fill="#16231b" stroke="#344a3a"/>
+<text x="306" y="172" font-family="Consolas,monospace" font-size="11" fill="#79b08d">FILTERS</text>
+<rect x="304" y="186" width="376" height="34" rx="7" fill="#0c1711" stroke="#4d7557"/>
+<text x="319" y="207" font-family="Segoe UI,Arial,sans-serif" font-size="13" fill="#90ad9c">Search host / path...</text>
+<rect x="699" y="186" width="132" height="34" rx="7" fill="#22382a" stroke="#496b55"/><text x="765" y="207" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="13" fill="#cdf8da">All methods</text>
+<rect x="845" y="186" width="140" height="34" rx="7" fill="#22382a" stroke="#496b55"/><text x="915" y="207" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="13" fill="#cdf8da">All outcomes</text>
+<rect x="999" y="186" width="155" height="34" rx="7" fill="#214b30" stroke="#57ad78"/><text x="1076" y="207" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="13" fill="#b2ffc9">✓  In scope</text>
+<rect x="1168" y="186" width="175" height="34" rx="7" fill="#22382a" stroke="#496b55"/><text x="1255" y="207" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="13" fill="#cdf8da">Reset filters</text>
+<rect x="284" y="256" width="1090" height="244" rx="10" fill="#0e1712" stroke="#334c3a"/>
+<rect x="285" y="257" width="1088" height="46" rx="9" fill="#1d2a20"/>
+<text x="305" y="285" font-family="Consolas,monospace" font-size="13" fill="#8fae9b">#</text>
+<text x="387" y="285" font-family="Consolas,monospace" font-size="13" fill="#8fae9b">METHOD</text>
+<text x="551" y="285" font-family="Consolas,monospace" font-size="13" fill="#8fae9b">HOST / PATH</text>
+<text x="1113" y="285" font-family="Consolas,monospace" font-size="13" fill="#8fae9b">STATUS</text>
+<text x="1252" y="285" font-family="Consolas,monospace" font-size="13" fill="#8fae9b">TIME</text>
+<rect x="289" y="304" width="1080" height="46" rx="4" fill="#1d4430"/><text x="304" y="333" font-family="Consolas,monospace" font-size="14" fill="#a1d5b4">024</text><text x="388" y="333" font-family="Consolas,monospace" font-size="14" font-weight="700" fill="#8effb7">GET</text><text x="552" y="333" font-family="Consolas,monospace" font-size="14" fill="#dae9db">127.0.0.1:8989 /api/status</text><text x="1118" y="333" font-family="Consolas,monospace" font-size="14" font-weight="700" fill="#78f9aa">200</text><text x="1253" y="333" font-family="Consolas,monospace" font-size="14" fill="#a3bbaa">14 ms</text><text x="304" y="381" font-family="Consolas,monospace" font-size="14" fill="#a1d5b4">025</text><text x="388" y="381" font-family="Consolas,monospace" font-size="14" font-weight="700" fill="#c1eaaa">POST</text><text x="552" y="381" font-family="Consolas,monospace" font-size="14" fill="#dae9db">127.0.0.1:8989 /api/test</text><text x="1118" y="381" font-family="Consolas,monospace" font-size="14" font-weight="700" fill="#78f9aa">200</text><text x="1253" y="381" font-family="Consolas,monospace" font-size="14" fill="#a3bbaa">19 ms</text><rect x="289" y="400" width="1080" height="46" fill="#142019"/><text x="304" y="429" font-family="Consolas,monospace" font-size="14" fill="#a1d5b4">026</text><text x="388" y="429" font-family="Consolas,monospace" font-size="14" font-weight="700" fill="#8effb7">GET</text><text x="552" y="429" font-family="Consolas,monospace" font-size="14" fill="#dae9db">localhost:8989 /health</text><text x="1118" y="429" font-family="Consolas,monospace" font-size="14" font-weight="700" fill="#78f9aa">200</text><text x="1253" y="429" font-family="Consolas,monospace" font-size="14" fill="#a3bbaa">12 ms</text><text x="304" y="477" font-family="Consolas,monospace" font-size="14" fill="#a1d5b4">027</text><text x="388" y="477" font-family="Consolas,monospace" font-size="14" font-weight="700" fill="#8effb7">GET</text><text x="552" y="477" font-family="Consolas,monospace" font-size="14" fill="#dae9db">localhost:8989 /favicon.ico</text><text x="1118" y="477" font-family="Consolas,monospace" font-size="14" font-weight="700" fill="#ffc978">404</text><text x="1253" y="477" font-family="Consolas,monospace" font-size="14" fill="#a3bbaa">8 ms</text><rect x="284" y="517" width="1090" height="222" rx="10" fill="#121e17" stroke="#345340"/>
+<text x="307" y="546" font-family="Segoe UI,Arial,sans-serif" font-size="16" font-weight="700" fill="#f2fff6">Transaction 024</text>
+<text x="520" y="546" font-family="Consolas,monospace" font-size="12" fill="#71db99">GET /api/status</text>
+<path d="M304 567H1353" stroke="#304c38"/>
+<rect x="307" y="577" width="107" height="31" rx="6" fill="#225239"/><text x="361" y="598" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="700" fill="#bdffd0">Response</text>
+<text x="434" y="598" font-family="Segoe UI,Arial,sans-serif" font-size="14" fill="#9fbbab">Request</text>
+<text x="311" y="639" font-family="Consolas,monospace" font-size="14" fill="#8ff6b9">HTTP/1.1 200 OK</text>
+<text x="311" y="668" font-family="Consolas,monospace" font-size="14" fill="#acbfae">Content-Type: application/json</text>
+<text x="311" y="702" font-family="Consolas,monospace" font-size="15" fill="#d8ffe4">{ "status": "ok", "environment": "local" }</text>
+<rect x="34" y="782" width="1372" height="22" rx="5" fill="#0d1d14"/>
+<text x="59" y="797" font-family="Consolas,monospace" font-size="11" letter-spacing="2" fill="#97dcb1">CONCEPTUAL INTERFACE ILLUSTRATION · NOT A REAL SCREENSHOT</text>
+</svg>
